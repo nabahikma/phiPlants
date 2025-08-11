@@ -1,113 +1,181 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Processing XCMS</title>
-    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
-     <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            height: 100%;
-            font-family: Arial, sans-serif;
-        }
-        .container {
-            display: flex;
-            height: 100%;
-        }
-        .left-half {
-            flex: 1;
-            background-image: url('/static/lefthalf.jpeg');
-            background-size: cover;
-            background-position: center;
-        }
-        .right-half {
-            flex: 1;
-            background-color: #e6f3f5;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            padding: 40px;
-        }
-        .form-container {
-            width: 100%;
-            max-width: 400px;
-        }
-        .file-input-group {
-            display: flex;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-        .file-input-group input {
-            flex: 1;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 15px;
-            font-size: 16px;
-            outline: none;
-        }
-        .remove-file-btn {
-            background-color: #ff4d4d;
-            color: white;
-            border: none;
-            border-radius: 50%;
-            width: 30px;
-            height: 30px;
-            font-size: 16px;
-            cursor: pointer;
-            margin-left: 10px;
-        }
-        .remove-file-btn:hover {
-            background-color: #cc0000;
-        }
-        .add-file-btn {
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            padding: 10px;
-            border-radius: 15px;
-            font-size: 16px;
-            cursor: pointer;
-            width: 100%;
-        }
-        .add-file-btn:hover {
-            background-color: #45a049;
-        }
-        .submit-btn {
-            background-color: #007bff;
-            color: white;
-            border: none;
-            padding: 15px;
-            border-radius: 25px;
-            font-size: 16px;
-            cursor: pointer;
-            width: 100%;
-        }
-        .submit-btn:hover {
-            background-color: #0056b3;
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Processing XCMS</title>
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon" />
+  <style>
+    :root {
+      --bg: #e6f3f5;
+      --btn: #007bff;
+      --btn-hover: #0056b3;
+      --border: #ddd;
+      --text: #111;
+    }
+    * { box-sizing: border-box; }
+    body, html { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; color: var(--text); }
+    .container { display: flex; height: 100%; }
+    .left-half { flex: 1; background-image: url('/static/lefthalf.jpeg'); background-size: cover; background-position: center; }
+    .right-half { flex: 1; background-color: var(--bg); display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px; }
+    h2 { margin: 0 0 6px 0; }
+    h4 { margin: 0 0 18px 0; font-weight: 500; }
+    .form-container { width: 100%; max-width: 520px; background: white; border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
+    label { display: block; margin: 10px 0 6px; font-weight: 600; }
+    input[type="text"], input[type="number"] {
+      width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 12px; font-size: 16px; outline: none;
+    }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    .submit-btn {
+      background: var(--btn); color: white; border: none; padding: 14px; border-radius: 22px;
+      font-size: 16px; cursor: pointer; width: 100%; margin-top: 16px;
+    }
+    .submit-btn:hover { background: var(--btn-hover); }
+    .pill {
+      display: inline-block; padding: 6px 12px; border-radius: 20px; background: #f8f8f8;
+      border: 1px solid var(--border); margin: 0 8px 12px 0; font-size: 14px;
+    }
+    #status { margin-top: 10px; white-space: pre-wrap; min-height: 1.2em; }
+    .note { font-size: 13px; color: #555; margin-top: 6px; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="left-half"></div>
-        <div class="right-half">
-            <h2>The Converting is Done ✅</h2>
-            <br><br>
-            <h4>Lets Apply The Algorithms on our data!</h4>
-            <div class="form-container">
-                <form id="uploadForm">
-                    <label for="outputName">Features Table Name</label>
-                    <input type="text" id="outputName" class="form-control" placeholder="processed_data" value="processed_data">
-                    <br><br>
-                    <button type="submit" id="submitBtn" class="submit-btn">Start Processing  🧪</button>
-                </form>
-                <p id="status"></p>
-            </div>
-        </div>
-    </div>
+  <div class="container">
+    <div class="left-half"></div>
 
- </body>
+    <div class="right-half">
+      <h2>The Converting is Done ✅</h2>
+      <h4>Let’s apply XCMS on your data</h4>
+
+      <div class="form-container">
+        <!-- Visible summary pills -->
+        <div class="pill">Directory: <strong>{{ directory }}</strong></div>
+        <div class="pill">Polarity: <strong>{{ polarity }}</strong></div>
+
+        <form id="xcmsForm">
+          <!-- Hidden fields to pass through -->
+          <input type="hidden" id="directory" value="{{ directory }}">
+          <input type="hidden" id="polarity" value="{{ polarity }}">
+
+          <label for="outputName">Features Table Name</label>
+          <input type="text" id="outputName" value="processed_data" placeholder="processed_data" />
+
+          <div class="row">
+            <div>
+              <label for="ppm">ppm</label>
+              <input type="number" id="ppm" step="0.1" min="0.1" value="15">
+            </div>
+            <div>
+              <label for="snr">S/N</label>
+              <input type="number" id="snr" step="0.1" min="0.1" value="6">
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="noise">Noise</label>
+              <input type="number" id="noise" step="1" min="0" value="0">
+            </div>
+            <div>
+              <label for="mzdiff">m/z diff</label>
+              <input type="number" id="mzdiff" step="0.001" value="0.01">
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="min_peakwidth">Min peakwidth (s)</label>
+              <input type="number" id="min_peakwidth" step="0.1" min="0.1" value="2">
+            </div>
+            <div>
+              <label for="max_peakwidth">Max peakwidth (s)</label>
+              <input type="number" id="max_peakwidth" step="0.1" min="0.2" value="30">
+            </div>
+          </div>
+
+          <label for="timeout_sec">Timeout (seconds, optional)</label>
+          <input type="number" id="timeout_sec" step="1" min="0" placeholder="0 = no timeout" value="0">
+          <div class="note">If your data is large, keep timeout 0 (no timeout).</div>
+
+          <button type="submit" id="submitBtn" class="submit-btn">Start Processing 🧪</button>
+        </form>
+
+        <p id="status"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("xcmsForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("submitBtn");
+      const status = document.getElementById("status");
+
+      const valNum = (id, def) => {
+        const v = parseFloat(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : def;
+      };
+
+      const payload = {
+        output_name: (document.getElementById("outputName").value || "processed_data").trim(),
+        directory: document.getElementById("directory").value,
+        polarity: document.getElementById("polarity").value, // "positive" or "negative"
+        ppm: valNum("ppm", 15),
+        snr: valNum("snr", 6),
+        noise: valNum("noise", 0),
+        min_peakwidth: valNum("min_peakwidth", 2),
+        max_peakwidth: valNum("max_peakwidth", 30),
+        mzdiff: valNum("mzdiff", 0.01),
+        timeout_sec: valNum("timeout_sec", 0)
+      };
+
+      // Quick client checks
+      if (!/^positive|negative$/.test(payload.polarity)) {
+        status.textContent = "❌ Polarity must be 'positive' or 'negative'.";
+        return;
+      }
+      if (payload.max_peakwidth <= payload.min_peakwidth) {
+        status.textContent = "❌ Max peakwidth must be greater than min peakwidth.";
+        return;
+      }
+
+      btn.disabled = true;
+      status.textContent = "Starting XCMS…";
+
+      try {
+        const resp = await fetch("/xcms/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        if (!resp.ok) {
+          let msg = `Server returned ${resp.status}`;
+          try {
+            const j = await resp.json();
+            if (j && j.detail) msg = j.detail;
+          } catch {
+            const t = await resp.text();
+            if (t) msg = t;
+          }
+          throw new Error(msg);
+        }
+
+        const data = await resp.json();
+        status.textContent = "Done ✅ Redirecting to annotation…";
+        const q = new URLSearchParams({
+          directory: payload.directory,
+          polarity: payload.polarity,
+          table: data.output_name
+        });
+        window.location.href = `/annotation_part?${q.toString()}`;
+      } catch (err) {
+        status.textContent = "❌ Failed: " + (err?.message || err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
 </html>
