@@ -86,7 +86,7 @@ form.addEventListener('submit', async (event) => {
         if (m) {
             const exitCode = Number(m[1]);
             if (exitCode === 0) {
-                const dest = `/Processing_xcms?parent_folder=${encodeURIComponent(parentFolder)}`;
+                const dest = `/Processing_xcms`;
                 window.location.assign(dest);
             } else {
                 logsDiv.textContent += `\nProcess finished with errors (exit ${exitCode}). Not redirecting.\n`;

@@ -33,6 +33,12 @@ async def processing_page():
     return HTMLResponse(content=html_path.read_text(), status_code=200)
 
 
+@app.get("/Processing_xcms", response_class=HTMLResponse)
+async def processing_xcms(request:Request):
+    return templates.TemplateResponse("/Processing_xcms.html", {"request": request})
+
+
+
 @app.get("/Learn", response_class=HTMLResponse)
 async def learn(request: Request):
     return templates.TemplateResponse("LearnPage.html", {"request": request})

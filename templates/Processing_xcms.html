@@ -2,9 +2,112 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Processing XCMS Page</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processing XCMS</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+     <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+            height: 100%;
+        }
+        .left-half {
+            flex: 1;
+            background-image: url('/static/lefthalf.jpeg');
+            background-size: cover;
+            background-position: center;
+        }
+        .right-half {
+            flex: 1;
+            background-color: #e6f3f5;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+        .form-container {
+            width: 100%;
+            max-width: 400px;
+        }
+        .file-input-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .file-input-group input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 15px;
+            font-size: 16px;
+            outline: none;
+        }
+        .remove-file-btn {
+            background-color: #ff4d4d;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .remove-file-btn:hover {
+            background-color: #cc0000;
+        }
+        .add-file-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 15px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+        }
+        .add-file-btn:hover {
+            background-color: #45a049;
+        }
+        .submit-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 15px;
+            border-radius: 25px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+        }
+        .submit-btn:hover {
+            background-color: #0056b3;
+        }
+    </style>
 </head>
 <body>
-<h1>Processing Page</h1>
-</body>
+    <div class="container">
+        <div class="left-half"></div>
+        <div class="right-half">
+            <h2>The Converting is Done ✅</h2>
+            <br><br>
+            <h4>Lets Apply The Algorithms on our data!</h4>
+            <div class="form-container">
+                <form id="uploadForm">
+                    <label for="outputName">Features Table Name</label>
+                    <input type="text" id="outputName" class="form-control" placeholder="processed_data" value="processed_data">
+                    <br><br>
+                    <button type="submit" id="submitBtn" class="submit-btn">Start Processing  🧪</button>
+                </form>
+                <p id="status"></p>
+            </div>
+        </div>
+    </div>
+
+ </body>
 </html>
