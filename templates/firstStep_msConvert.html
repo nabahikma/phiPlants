@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" href="/static/icon.jpeg" type="image/x-icon">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MSConvert Options</title>
+    <style>
+        body, html { margin:0; padding:0; height:100%; font-family: Arial, sans-serif; }
+        .container { display:flex; height:100%; }
+        .left-half { flex:1; background-image:url('/static/lefthalf.jpeg'); background-size:cover; background-position:center; }
+        .right-half { flex:1; background-color:#e6f3f5; display:flex; flex-direction:column; justify-content:flex-start; padding:40px; overflow-y:auto; }
+        form { display:flex; flex-direction:column; gap:20px; }
+        label { font-size:16px; margin-bottom:5px; }
+        input[type="text"], input[type="file"] { padding:10px; font-size:16px; border:1px solid #ccc; border-radius:5px; }
+        button { background-color:white; border:1px solid #ccc; padding:15px 20px; border-radius:25px; font-size:18px; color:#333; cursor:pointer; transition:background-color 0.3s; }
+        button:hover { background-color:#f0f0f0; }
+        .logs { margin-top:20px; background:white; border:1px solid #ccc; border-radius:5px; padding:15px; height:300px; overflow-y:auto; font-family:monospace; font-size:14px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="left-half"></div>
+    <div class="right-half">
+        <h1>Convert Raw (.d) to mzML</h1>
+
+        <!-- Removed enctype because we’re not uploading files; not harmful if left -->
+        <form id="msconvert-form" action="/run-msconvert/" method="post">
+            <label for="polarity">Polarity (e.g., positive or negative):</label>
+            <input type="text" id="polarity" name="polarity" placeholder="positive" required>
+
+            <label for="scan_time">Scan Time (min,max seconds, e.g., 15,2100):</label>
+            <input type="text" id="scan_time" name="scan_time" placeholder="15,2100" required>
+
+            <label for="mz_window">m/z Window (min,max, e.g., 100,1500):</label>
+            <input type="text" id="mz_window" name="mz_window" placeholder="100,1500" required>
+
+            <!-- ✅ Renamed to parent_folder to match FastAPI -->
+            <label for="parent_folder">Parent folder path (contains .d subfolders):</label>
+            <input type="text" id="parent_folder" name="parent_folder" placeholder="D:\Runs\Batch_01" required>
+
+            <button type="submit">Run</button>
+        </form>
+
+        <div class="logs" id="logs">Processing logs will appear here...</div>
+    </div>
+</div>
+
+<script>
+const form = document.getElementById('msconvert-form');
+const logsDiv = document.getElementById('logs');
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const formData = new FormData(form);
+    const parentFolder = formData.get('parent_folder') || '';
+
+    const response = await fetch(form.action, {
+        method: 'POST',
+        body: formData
+    });
+
+    if (!response.body) {
+        logsDiv.textContent = 'Failed to start processing.';
+        return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    logsDiv.textContent = '';
+
+    // Keep a small buffer to avoid splitting the sentinel across chunks
+    let tailBuffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        logsDiv.textContent += chunk;
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+
+        tailBuffer = (tailBuffer + chunk).slice(-200); // keep last ~200 chars
+        const m = tailBuffer.match(/__MSCONVERT_DONE__\s+EXIT_CODE=(\d+)/);
+        if (m) {
+            const exitCode = Number(m[1]);
+            if (exitCode === 0) {
+                const dest = `/Processing_xcms?parent_folder=${encodeURIComponent(parentFolder)}`;
+                window.location.assign(dest);
+            } else {
+                logsDiv.textContent += `\nProcess finished with errors (exit ${exitCode}). Not redirecting.\n`;
+            }
+            break; // stop reading further
+        }
+    }
+});
+</script>
+</body>
+</html>

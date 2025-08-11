@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phi Plants</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+            height: 100%;
+        }
+        .left-half {
+            flex: 1;
+            background-image: url('/static/lefthalf.jpeg');
+            background-size: cover;
+            background-position: center;
+        }
+        .right-half {
+            flex: 1;
+            background-color: #e6f3f5;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 40px;
+        }
+        .button {
+            background-color: white;
+            border: none;
+            padding: 15px 20px;
+            margin: 10px 0;
+            border-radius: 25px;
+            font-size: 24px;
+            color: #333;
+            text-align: left;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .button:hover {
+            background-color: #f0f0f0;
+        }
+        .button::after {
+            content: '>';
+            margin-left: 30px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-half"></div>
+        <div class="right-half">
+            <button class="button" onclick="location.href='/firstStep_msConvert'">Start Analysis!</button>
+            <button class="button" onclick="location.href='/OpenAnalyzedProject'">Analyzed Projects!</button>
+            <button class="button" onclick="location.href='/OpenRProcessingStage'">Processing Stage!</button>
+            <button class="button" onclick="location.href='/Learn'">How to use this Program!</button>
+
+        </div>
+    </div>
+
+ </body>
+</html>

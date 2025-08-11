@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processing Logs</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+            height: 100%;
+        }
+        .left-half {
+            flex: 1;
+            background-image: url('/static/OGG.jpeg'); /* Update the path to your desired image */
+            background-size: cover;
+            background-position: center;
+        }
+        .right-half {
+            flex: 1;
+            background-color: #e6f3f5;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            padding: 40px;
+            overflow-y: auto;
+        }
+        h1 {
+            margin-bottom: 20px;
+        }
+        .logs {
+            margin-top: 20px;
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 15px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-half"></div>
+        <div class="right-half">
+            <h1>Processing Logs</h1>
+            <div class="logs" id="logs">Loading logs...</div>
+        </div>
+    </div>
+    <script>
+        const logsDiv = document.getElementById('logs');
+
+        async function fetchLogs() {
+            const response = await fetch('/run-msconvert'); // Endpoint for streaming logs
+
+            if (!response.body) {
+                logsDiv.textContent = 'Failed to load logs.';
+                return;
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            logsDiv.textContent = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                logsDiv.textContent += decoder.decode(value);
+                logsDiv.scrollTop = logsDiv.scrollHeight;
+            }
+        }
+
+        fetchLogs();
+    </script>
+</body>
+</html>
