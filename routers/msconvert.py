@@ -66,6 +66,7 @@ async def run_msconvert(
             yield line
         process.stdout.close()
         process.wait()
+        code = process.returncode  # ✅ Get actual exit code
         yield f"\n__MSCONVERT_DONE__ EXIT_CODE={code}\n"
 
     return StreamingResponse(stream_logs(), media_type="text/plain")
