@@ -15,19 +15,25 @@ def collect_d_folders(parent: Path) -> List[Path]:
 
 
 
+
 @router.post("/run-msconvert/")
 async def run_msconvert(
-        polarity: str = Form(...),
-        scan_time: str = Form(...),
-        parent_folder: str = Form(...),
-        mz_window: str = Form(...)
+    polarity: str = Form(...),
+    scan_time: str = Form(...),
+    parent_folder: str = Form(...),
+    mz_window: str = Form(...)
 ):
     parent_path = Path(parent_folder).expanduser().resolve()
     d_folders = collect_d_folders(parent_path)
-    if not d_folders:
-        return RedirectResponse(url="/processing", status_code=303)
-    out_dir = parent_folder
 
+    # ❌ Don't redirect from an API that is being streamed by fetch.
+    if not d_folders:
+        def err_stream():
+            yield f"No .d folders found under: {parent_path}\n"
+            yield "__MSCONVERT_DONE__ EXIT_CODE=1\n"
+        return StreamingResponse(err_stream(), media_type="text/plain; charset=utf-8")
+
+    out_dir = parent_folder
     exe = r'"C:\\pwiz\\msconvert.exe"'
     filters = " ".join([
         r'--filter "peakPicking vendor snr=10 msLevel=1-2"',
@@ -44,16 +50,11 @@ async def run_msconvert(
         r'--filter "MS2Denoise 6 0 true"',
         r'--filter "titleMaker <RunId>.<ScanNumber>.<ScanNumber>.<ChargeState>"',
     ])
-    # Quote every .d path and append
     inputs = " ".join([f'"{str(p)}"' for p in d_folders])
     command = f"{exe} {filters} {inputs}"
-    # Debug prints (server logs)
-    print("Parent path:", str(parent_path))
-    print("Found .d folders:", [str(p) for p in d_folders])
-    print("Output folder:", str(out_dir))
+
     print("Command:", command)
 
-    # Stream msconvert output
     def stream_logs():
         process = subprocess.Popen(
             command,
@@ -66,7 +67,7 @@ async def run_msconvert(
             yield line
         process.stdout.close()
         process.wait()
-        code = process.returncode  # ✅ Get actual exit code
+        code = process.returncode  # ✅ real exit code
         yield f"\n__MSCONVERT_DONE__ EXIT_CODE={code}\n"
 
-    return StreamingResponse(stream_logs(), media_type="text/plain")
+    return StreamingResponse(stream_logs(), media_type="text/plain; charset=utf-8")
