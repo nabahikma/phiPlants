@@ -1,14 +1,20 @@
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, Query
 from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-import asyncio
-import shlex
+from typing import Literal
+
+# Routers
 from routers import msconvert, xcms
+
 app = FastAPI()
+
+# Include routers
 app.include_router(msconvert.router)
+app.include_router(xcms.router)
+
+# Templates & static
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -28,25 +34,21 @@ async def processing_page(request: Request):
     return templates.TemplateResponse("processing.html", {"request": request})
 
 
-# ⬇️ Processing_xcms takes directory & polarity as query params and shows them
+# Require directory & polarity to be passed in the URL
 @app.get("/Processing_xcms", response_class=HTMLResponse)
-async def processing_xcms(request: Request, directory: str, polarity: str):
-    # you can sanitize/validate here if you need to
-    ctx = {
-        "request": request,
-        "directory": directory,
-        "polarity": polarity
-    }
-    return templates.TemplateResponse("Processing_xcms.html", ctx)
-
-
-
-
+async def processing_xcms(
+    request: Request,
+    directory: str = Query(..., description="Absolute path to mzML folder"),
+    polarity: Literal["positive", "negative"] = Query(...)
+):
+    return templates.TemplateResponse(
+        "Processing_xcms.html",
+        {"request": request, "directory": directory, "polarity": polarity},
+    )
 
 
 @app.get("/annotation_part", response_class=HTMLResponse)
 async def annotation_part(request: Request, directory: str, polarity: str, table: str):
-    # Show a simple landing page for annotation step (customize as you like)
     ctx = {"request": request, "directory": directory, "polarity": polarity, "table": table}
     return templates.TemplateResponse("annotation_part.html", ctx)
 

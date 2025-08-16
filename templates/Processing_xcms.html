@@ -6,38 +6,24 @@
   <title>Processing XCMS</title>
   <link rel="icon" href="/static/favicon.ico" type="image/x-icon" />
   <style>
-    :root {
-      --bg: #e6f3f5;
-      --btn: #007bff;
-      --btn-hover: #0056b3;
-      --border: #ddd;
-      --text: #111;
-    }
-    * { box-sizing: border-box; }
-    body, html { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; color: var(--text); }
-    .container { display: flex; height: 100%; }
-    .left-half { flex: 1; background-image: url('/static/lefthalf.jpeg'); background-size: cover; background-position: center; }
-    .right-half { flex: 1; background-color: var(--bg); display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px; }
-    h2 { margin: 0 0 6px 0; }
-    h4 { margin: 0 0 18px 0; font-weight: 500; }
-    .form-container { width: 100%; max-width: 520px; background: white; border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
-    label { display: block; margin: 10px 0 6px; font-weight: 600; }
-    input[type="text"], input[type="number"] {
-      width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 12px; font-size: 16px; outline: none;
-    }
-    .row { display: flex; gap: 12px; }
-    .row > div { flex: 1; }
-    .submit-btn {
-      background: var(--btn); color: white; border: none; padding: 14px; border-radius: 22px;
-      font-size: 16px; cursor: pointer; width: 100%; margin-top: 16px;
-    }
-    .submit-btn:hover { background: var(--btn-hover); }
-    .pill {
-      display: inline-block; padding: 6px 12px; border-radius: 20px; background: #f8f8f8;
-      border: 1px solid var(--border); margin: 0 8px 12px 0; font-size: 14px;
-    }
-    #status { margin-top: 10px; white-space: pre-wrap; min-height: 1.2em; }
-    .note { font-size: 13px; color: #555; margin-top: 6px; }
+    :root { --bg:#e6f3f5; --btn:#007bff; --btn-hover:#0056b3; --border:#ddd; --text:#111; }
+    * { box-sizing:border-box; }
+    body, html { margin:0; padding:0; height:100%; font-family:Arial, sans-serif; color:var(--text); }
+    .container { display:flex; height:100%; }
+    .left-half { flex:1; background-image:url('/static/lefthalf.jpeg'); background-size:cover; background-position:center; }
+    .right-half { flex:1; background-color:var(--bg); display:flex; flex-direction:column; justify-content:center; align-items:center; padding:40px; }
+    h2 { margin:0 0 6px 0; }
+    h4 { margin:0 0 18px 0; font-weight:500; }
+    .form-container { width:100%; max-width:520px; background:white; border:1px solid var(--border); border-radius:16px; padding:20px; }
+    label { display:block; margin:10px 0 6px; font-weight:600; }
+    input[type="text"], input[type="number"] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:12px; font-size:16px; outline:none; }
+    .row { display:flex; gap:12px; }
+    .row > div { flex:1; }
+    .submit-btn { background:var(--btn); color:white; border:none; padding:14px; border-radius:22px; font-size:16px; cursor:pointer; width:100%; margin-top:16px; }
+    .submit-btn:hover { background:var(--btn-hover); }
+    .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f8f8f8; border:1px solid var(--border); margin:0 8px 12px 0; font-size:14px; }
+    #status { margin-top:10px; white-space:pre-wrap; min-height:1.2em; }
+    .note { font-size:13px; color:#555; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -49,12 +35,10 @@
       <h4>Let’s apply XCMS on your data</h4>
 
       <div class="form-container">
-        <!-- Visible summary pills -->
         <div class="pill">Directory: <strong>{{ directory }}</strong></div>
         <div class="pill">Polarity: <strong>{{ polarity }}</strong></div>
 
         <form id="xcmsForm">
-          <!-- Hidden fields to pass through -->
           <input type="hidden" id="directory" value="{{ directory }}">
           <input type="hidden" id="polarity" value="{{ polarity }}">
 
@@ -120,7 +104,7 @@
       const payload = {
         output_name: (document.getElementById("outputName").value || "processed_data").trim(),
         directory: document.getElementById("directory").value,
-        polarity: document.getElementById("polarity").value, // "positive" or "negative"
+        polarity: document.getElementById("polarity").value,
         ppm: valNum("ppm", 15),
         snr: valNum("snr", 6),
         noise: valNum("noise", 0),
@@ -130,7 +114,6 @@
         timeout_sec: valNum("timeout_sec", 0)
       };
 
-      // Quick client checks
       if (!/^positive|negative$/.test(payload.polarity)) {
         status.textContent = "❌ Polarity must be 'positive' or 'negative'.";
         return;

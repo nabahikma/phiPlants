@@ -1,66 +1,54 @@
-import uvicorn
-from fastapi import FastAPI, Request, HTTPException
-from starlette.responses import HTMLResponse
-from starlette.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Optional, Literal
+from pathlib import Path
 import asyncio
-import shlex
-from fastapi import APIRouter, Form
-import subprocess
-
-
+import tempfile
 
 router = APIRouter()
 
+# Windows often needs the absolute path, e.g. r"C:\Program Files\R\R-4.4.0\bin\Rscript.exe"
+RSCRIPT_BIN = "Rscript"
 
-
-# ===========================
-# /xcms/start (R embedded)
-# ===========================
-import asyncio
-import tempfile
-from pathlib import Path
-from typing import Optional
-from fastapi import HTTPException
-from pydantic import BaseModel, Field, validator
-
-RSCRIPT_BIN = "Rscript"  # e.g., "/usr/local/bin/Rscript"
 
 class XcmsParams(BaseModel):
-    output_name: str = Field(..., min_length=1, max_length=128)
-    directory: str = Field(..., min_length=1)
-    polarity: str = Field(..., regex="^(positive|negative)$")
-    ppm: float = Field(..., gt=0)
-    snr: float = Field(..., gt=0)
-    noise: float = Field(..., ge=0)
+    output_name: str = Field(min_length=1, max_length=128)
+    directory: str = Field(min_length=1)
+    polarity: Literal["positive", "negative"]
+    ppm: float = Field(gt=0)
+    snr: float = Field(gt=0)
+    noise: float = Field(ge=0)
     min_peakwidth: float = Field(2.0, gt=0)
     max_peakwidth: float = Field(30.0, gt=0)
     mzdiff: float = Field(0.01)
-    timeout_sec: Optional[int] = Field(0, ge=0)
+    timeout_sec: Optional[int] = Field(0, ge=0, description="0 = no timeout")
 
-    @validator("output_name")
-    def safe_output(cls, v):
+    @field_validator("output_name")
+    @classmethod
+    def safe_output(cls, v: str) -> str:
         import re
         if not re.match(r"^[A-Za-z0-9._-]+$", v):
             raise ValueError("output_name allows letters, numbers, ., _, - only")
         return v
 
-    @validator("max_peakwidth")
-    def peakwidth_order(cls, v, values):
-        if "min_peakwidth" in values and v <= values["min_peakwidth"]:
+    @model_validator(mode="after")
+    def check_peakwidths(self):
+        if self.max_peakwidth <= self.min_peakwidth:
             raise ValueError("max_peakwidth must be greater than min_peakwidth")
-        return v
+        return self
 
-def _ensure_ready(params: XcmsParams):
+
+def _ensure_ready(params: XcmsParams) -> Path:
     d = Path(params.directory).expanduser().resolve()
     if not d.exists() or not d.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {d}")
-    if not any(p.suffix.lower() == ".mzml" for p in d.glob("*.mzml")):
-        # also check *.mzML (mixed case)
-        if not any(p.suffix == ".mzML" for p in d.glob("*.mzML")):
-            raise HTTPException(status_code=400, detail=f"No mzML files found in: {d}")
+
+    # Check for mzML files (case-insensitive)
+    has_mzml = any(p.suffix.lower() == ".mzml" for p in d.glob("*"))
+    if not has_mzml:
+        raise HTTPException(status_code=400, detail=f"No mzML files found in: {d}")
     return d
+
 
 R_SCRIPT_EMBEDDED = r'''
 # ==== Safe Library Loader ====
@@ -100,7 +88,7 @@ if (is.null(data_dir) || !dir.exists(data_dir)) {
 files <- list.files(data_dir, pattern="mzML$", full.names=TRUE, ignore.case=TRUE)
 if (length(files) == 0) stop("No mzML files found.")
 
-raw_data <- readMSData(files, mode = "onDisk", msLevel. = 1:2)
+raw_data <- MSnbase::readMSData(files, mode = "onDisk", msLevel. = 1:2)
 sample_classes <- ifelse(grepl("blank", tolower(basename(files))), "blank", "sample")
 pData(raw_data)$sample_group <- factor(sample_classes)
 
@@ -108,7 +96,7 @@ pData(raw_data)$sample_group <- factor(sample_classes)
 saveRDS(raw_data, file.path(data_dir, "raw_data.rds"))
 
 # ==== XCMS Processing ====
-cwp <- CentWaveParam(
+cwp <- xcms::CentWaveParam(
   ppm = ppm,
   peakwidth = c(min_pw, max_pw),
   snthr = snthr,
@@ -119,29 +107,29 @@ cwp <- CentWaveParam(
   noise = noise
 )
 
-xdata <- findChromPeaks(raw_data, param = cwp)
-xdata <- groupChromPeaks(xdata, param = PeakDensityParam(sampleGroups = sample_classes))
-xdata <- adjustRtime(xdata, param = PeakGroupsParam(minFraction = 0.5, smooth = "loess"))
-xdata <- groupChromPeaks(xdata, param = PeakDensityParam(sampleGroups = sample_classes))
-xdata <- fillChromPeaks(xdata)
+xdata <- xcms::findChromPeaks(raw_data, param = cwp)
+xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroups = sample_classes))
+xdata <- xcms::adjustRtime(xdata, param = xcms::PeakGroupsParam(minFraction = 0.5, smooth = "loess"))
+xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroups = sample_classes))
+xdata <- xcms::fillChromPeaks(xdata)
 
 saveRDS(xdata, file.path(data_dir, "xdata.rds"))
 
 # ==== CAMERA Annotation ====
 xset <- as(xdata, "xcmsSet")
-an <- xsAnnotate(xset)
-an <- groupFWHM(an)
-an <- findIsotopes(an)
-an <- groupCorr(an)
-an <- findAdducts(an, polarity = polarity_mode)
+an <- CAMERA::xsAnnotate(xset)
+an <- CAMERA::groupFWHM(an)
+an <- CAMERA::findIsotopes(an)
+an <- CAMERA::groupCorr(an)
+an <- CAMERA::findAdducts(an, polarity = polarity_mode)
 
-annotated_peaks <- getPeaklist(an)
+annotated_peaks <- CAMERA::getPeaklist(an)
 annotated_peaks$feature_id <- paste0("ID", seq_len(nrow(annotated_peaks)))
 
 # ==== MS2 Presence Check (±10s, ±0.01 m/z) ====
-ms2_idx <- which(msLevel(raw_data) == 2)
-ms2_rt  <- rtime(raw_data)[ms2_idx]
-ms2_pmz <- precursorMz(raw_data)[ms2_idx]
+ms2_idx <- which(MSnbase::msLevel(raw_data) == 2)
+ms2_rt  <- MSnbase::rtime(raw_data)[ms2_idx]
+ms2_pmz <- MSnbase::precursorMz(raw_data)[ms2_idx]
 
 has_ms2_vec <- vapply(seq_len(nrow(annotated_peaks)), function(i){
   mz <- annotated_peaks$mz[i]
@@ -155,7 +143,7 @@ annotated_peaks$has_ms2 <- has_ms2_vec
 
 # ==== Save outputs ====
 out_csv <- file.path(data_dir, paste0(output_name, ".csv"))
-write.csv(annotated_peaks, file = out_csv, row.names = FALSE)
+utils::write.csv(annotated_peaks, file = out_csv, row.names = FALSE)
 saveRDS(an, file.path(data_dir, "camera_annotated.rds"))
 
 cat("SUCCESS: Wrote CSV to", out_csv, "\n")
@@ -190,9 +178,10 @@ async def xcms_start(params: XcmsParams):
             stderr=asyncio.subprocess.STDOUT,
         )
     except FileNotFoundError:
-        # cleanup temp file
-        try: r_path.unlink(missing_ok=True)
-        except Exception: pass
+        try:
+            r_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Rscript binary not found: {RSCRIPT_BIN}")
 
     try:
@@ -204,16 +193,20 @@ async def xcms_start(params: XcmsParams):
                 try:
                     await proc.wait()
                 finally:
-                    raise HTTPException(status_code=504, detail=f"xcms run exceeded {params.timeout_sec}s and was terminated.")
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"xcms run exceeded {params.timeout_sec}s and was terminated."
+                    )
         else:
             stdout, _ = await proc.communicate()
     finally:
         # best-effort cleanup of the temp R file
-        try: r_path.unlink(missing_ok=True)
-        except Exception: pass
+        try:
+            r_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     log_text = (stdout or b"").decode(errors="ignore")
-
     if proc.returncode != 0:
         tail = log_text[-2000:] if log_text else "No logs captured."
         raise HTTPException(status_code=500, detail=f"xcms failed (exit {proc.returncode}).\n\n{tail}")

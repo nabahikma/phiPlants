@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Form
 import subprocess
-from starlette.responses import RedirectResponse, StreamingResponse
+from starlette.responses import StreamingResponse
 from pathlib import Path
 from typing import List
 
@@ -8,12 +8,9 @@ router = APIRouter()
 
 
 def collect_d_folders(parent: Path) -> List[Path]:
-
     if not parent.exists() or not parent.is_dir():
         return []
     return [p for p in parent.iterdir() if p.is_dir() and p.suffix.lower() == ".d"]
-
-
 
 
 @router.post("/run-msconvert/")
@@ -26,7 +23,7 @@ async def run_msconvert(
     parent_path = Path(parent_folder).expanduser().resolve()
     d_folders = collect_d_folders(parent_path)
 
-    # ❌ Don't redirect from an API that is being streamed by fetch.
+    # If no inputs, stream an error and stop
     if not d_folders:
         def err_stream():
             yield f"No .d folders found under: {parent_path}\n"
@@ -67,7 +64,7 @@ async def run_msconvert(
             yield line
         process.stdout.close()
         process.wait()
-        code = process.returncode  # ✅ real exit code
+        code = process.returncode
         yield f"\n__MSCONVERT_DONE__ EXIT_CODE={code}\n"
 
     return StreamingResponse(stream_logs(), media_type="text/plain; charset=utf-8")
