@@ -22,7 +22,7 @@
     .submit-btn { background:var(--btn); color:white; border:none; padding:14px; border-radius:22px; font-size:16px; cursor:pointer; width:100%; margin-top:16px; }
     .submit-btn:hover { background:var(--btn-hover); }
     .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f8f8f8; border:1px solid var(--border); margin:0 8px 12px 0; font-size:14px; }
-    #status { margin-top:10px; white-space:pre-wrap; min-height:1.2em; }
+    #status { font-family: monospace; height: 300px; overflow-y: auto; background: #fff; border: 1px solid #ddd; padding: 10px; }
     .note { font-size:13px; color:#555; margin-top:6px; }
   </style>
 </head>
@@ -32,7 +32,7 @@
 
     <div class="right-half">
       <h2>The Converting is Done ✅</h2>
-      <h4>Let’s apply XCMS on your data</h4>
+      <h4>Let’s apply The Algorithms on your data</h4>
 
       <div class="form-container">
         <div class="pill">Directory: <strong>{{ directory }}</strong></div>
@@ -42,45 +42,32 @@
           <input type="hidden" id="directory" value="{{ directory }}">
           <input type="hidden" id="polarity" value="{{ polarity }}">
 
-          <label for="outputName">Features Table Name</label>
-          <input type="text" id="outputName" value="processed_data" placeholder="processed_data" />
-
           <div class="row">
             <div>
               <label for="ppm">ppm</label>
-              <input type="number" id="ppm" step="0.1" min="0.1" value="15">
+              <input type="number" id="ppm" step="1" min="1" value="5">
             </div>
             <div>
-              <label for="snr">S/N</label>
-              <input type="number" id="snr" step="0.1" min="0.1" value="6">
-            </div>
-          </div>
-
-          <div class="row">
-            <div>
-              <label for="noise">Noise</label>
-              <input type="number" id="noise" step="1" min="0" value="0">
+              <label for="snr">S/N Ratio</label>
+              <input type="number" id="snr" step="1" min="1" value="10">
             </div>
             <div>
-              <label for="mzdiff">m/z diff</label>
-              <input type="number" id="mzdiff" step="0.001" value="0.01">
+              <label for="noise">Noise Level</label>
+              <input type="number" id="noise" step="10" min="0" value="30">
             </div>
           </div>
 
           <div class="row">
             <div>
               <label for="min_peakwidth">Min peakwidth (s)</label>
-              <input type="number" id="min_peakwidth" step="0.1" min="0.1" value="2">
+              <input type="number" id="min_peakwidth" step="1" min="2" value="4">
             </div>
             <div>
               <label for="max_peakwidth">Max peakwidth (s)</label>
-              <input type="number" id="max_peakwidth" step="0.1" min="0.2" value="30">
+              <input type="number" id="max_peakwidth" step="1" min="4" value="40">
             </div>
           </div>
 
-          <label for="timeout_sec">Timeout (seconds, optional)</label>
-          <input type="number" id="timeout_sec" step="1" min="0" placeholder="0 = no timeout" value="0">
-          <div class="note">If your data is large, keep timeout 0 (no timeout).</div>
 
           <button type="submit" id="submitBtn" class="submit-btn">Start Processing 🧪</button>
         </form>
@@ -90,75 +77,89 @@
     </div>
   </div>
 
-  <script>
-    document.getElementById("xcmsForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById("submitBtn");
-      const status = document.getElementById("status");
+  <!-- only the <script> part changes; keep your HTML/CSS form as-is -->
+<script>
+  document.getElementById("xcmsForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("submitBtn");
+    const status = document.getElementById("status");
 
-      const valNum = (id, def) => {
-        const v = parseFloat(document.getElementById(id).value);
-        return Number.isFinite(v) ? v : def;
-      };
+    const valNum = (id, def) => {
+      const v = parseFloat(document.getElementById(id).value);
+      return Number.isFinite(v) ? v : def;
+    };
 
-      const payload = {
-        output_name: (document.getElementById("outputName").value || "processed_data").trim(),
-        directory: document.getElementById("directory").value,
-        polarity: document.getElementById("polarity").value,
-        ppm: valNum("ppm", 15),
-        snr: valNum("snr", 6),
-        noise: valNum("noise", 0),
-        min_peakwidth: valNum("min_peakwidth", 2),
-        max_peakwidth: valNum("max_peakwidth", 30),
-        mzdiff: valNum("mzdiff", 0.01),
-        timeout_sec: valNum("timeout_sec", 0)
-      };
+    const payload = {
+      directory: document.getElementById("directory").value,
+      polarity: document.getElementById("polarity").value,
+      ppm: valNum("ppm", 15),
+      snr: valNum("snr", 6),
+      noise: valNum("noise", 0),
+      min_peakwidth: valNum("min_peakwidth", 2),
+      max_peakwidth: valNum("max_peakwidth", 30),
+    };
 
-      if (!/^positive|negative$/.test(payload.polarity)) {
-        status.textContent = "❌ Polarity must be 'positive' or 'negative'.";
+    if (!/^positive|negative$/.test(payload.polarity)) {
+      status.textContent = "❌ Polarity must be 'positive' or 'negative'.";
+      return;
+    }
+    if (payload.max_peakwidth <= payload.min_peakwidth) {
+      status.textContent = "❌ Max peakwidth must be greater than min peakwidth.";
+      return;
+    }
+
+    btn.disabled = true;
+    status.textContent = "";
+
+    try {
+      const resp = await fetch("/xcms/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.body) {
+        status.textContent = "Failed to start XCMS.";
         return;
       }
-      if (payload.max_peakwidth <= payload.min_peakwidth) {
-        status.textContent = "❌ Max peakwidth must be greater than min peakwidth.";
-        return;
-      }
 
-      btn.disabled = true;
-      status.textContent = "Starting XCMS…";
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let tailBuffer = "";
 
-      try {
-        const resp = await fetch("/xcms/start", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-        if (!resp.ok) {
-          let msg = `Server returned ${resp.status}`;
-          try {
-            const j = await resp.json();
-            if (j && j.detail) msg = j.detail;
-          } catch {
-            const t = await resp.text();
-            if (t) msg = t;
+        const chunk = decoder.decode(value);
+        status.textContent += chunk;
+        status.scrollTop = status.scrollHeight;
+
+        tailBuffer = (tailBuffer + chunk).slice(-300);
+        const m = tailBuffer.match(/__XCMS_DONE__\s+EXIT_CODE=(\d+)/);
+        if (m) {
+          const exitCode = Number(m[1]);
+          if (exitCode === 0) {
+            status.textContent += "\n✅ Success. Redirecting…\n";
+            const q = new URLSearchParams({
+              directory: payload.directory,
+              polarity: payload.polarity,
+              table: payload.output_name
+            });
+            window.location.href = `/annotation_part?${q.toString()}`;
+          } else {
+            status.textContent += `\n❌ XCMS failed (exit ${exitCode}). Check logs above.\n`;
           }
-          throw new Error(msg);
+          break;
         }
-
-        const data = await resp.json();
-        status.textContent = "Done ✅ Redirecting to annotation…";
-        const q = new URLSearchParams({
-          directory: payload.directory,
-          polarity: payload.polarity,
-          table: data.output_name
-        });
-        window.location.href = `/annotation_part?${q.toString()}`;
-      } catch (err) {
-        status.textContent = "❌ Failed: " + (err?.message || err);
-      } finally {
-        btn.disabled = false;
       }
-    });
-  </script>
+    } catch (err) {
+      status.textContent += "\n❌ Network/Server error: " + (err?.message || err);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+
 </body>
 </html>

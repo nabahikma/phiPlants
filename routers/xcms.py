@@ -1,4 +1,6 @@
+# routers/xcms.py
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Literal
 from pathlib import Path
@@ -7,7 +9,7 @@ import tempfile
 
 router = APIRouter()
 
-# Windows often needs the absolute path, e.g. r"C:\Program Files\R\R-4.4.0\bin\Rscript.exe"
+# Set to absolute Rscript.exe if needed on Windows
 RSCRIPT_BIN = "Rscript"
 
 
@@ -42,10 +44,8 @@ def _ensure_ready(params: XcmsParams) -> Path:
     d = Path(params.directory).expanduser().resolve()
     if not d.exists() or not d.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {d}")
-
-    # Check for mzML files (case-insensitive)
-    has_mzml = any(p.suffix.lower() == ".mzml" for p in d.glob("*"))
-    if not has_mzml:
+    # quick presence check (case-insensitive)
+    if not any(p.suffix.lower() == ".mzml" for p in d.glob("*")):
         raise HTTPException(status_code=400, detail=f"No mzML files found in: {d}")
     return d
 
@@ -73,12 +73,21 @@ get_arg <- function(name, default=NULL) {
 data_dir      <- get_arg("dir")
 polarity_mode <- get_arg("polarity", "negative")
 output_name   <- get_arg("output", "processed_data")
-ppm           <- as.numeric(get_arg("ppm", 5))
-snthr         <- as.numeric(get_arg("snr", 5))
-noise         <- as.numeric(get_arg("noise", 30))
-min_pw        <- as.numeric(get_arg("min_peakwidth", 4))
-max_pw        <- as.numeric(get_arg("max_peakwidth", 50))
-mzdiff        <- as.numeric(get_arg("mzdiff", -0.001))
+ppm           <- as.numeric(get_arg("ppm", 15))
+snthr         <- as.numeric(get_arg("snr", 6))
+noise         <- as.numeric(get_arg("noise", 0))
+min_pw        <- as.numeric(get_arg("min_peakwidth", 2))
+max_pw        <- as.numeric(get_arg("max_peakwidth", 30))
+mzdiff        <- as.numeric(get_arg("mzdiff", 0.01))
+
+cat("PARAMS:\n",
+    " dir=", data_dir, "\n",
+    " polarity=", polarity_mode, "\n",
+    " ppm=", ppm, "\n",
+    " snthr=", snthr, "\n",
+    " noise=", noise, "\n",
+    " peakwidth=[", min_pw, ",", max_pw, "]\n",
+    " mzdiff=", mzdiff, "\n", sep="")
 
 if (is.null(data_dir) || !dir.exists(data_dir)) {
   stop(paste("Invalid data_dir:", data_dir))
@@ -86,34 +95,46 @@ if (is.null(data_dir) || !dir.exists(data_dir)) {
 
 # ==== Load mzML (MS1 + MS2) ====
 files <- list.files(data_dir, pattern="mzML$", full.names=TRUE, ignore.case=TRUE)
+cat("Found", length(files), "mzML file(s)\n")
 if (length(files) == 0) stop("No mzML files found.")
 
 raw_data <- MSnbase::readMSData(files, mode = "onDisk", msLevel. = 1:2)
+
+ms1_count <- sum(MSnbase::msLevel(raw_data) == 1)
+ms2_count <- sum(MSnbase::msLevel(raw_data) == 2)
+cat("Spectra counts: MS1=", ms1_count, " MS2=", ms2_count, "\n", sep="")
+if (ms1_count == 0) {
+  stop("No MS1 spectra found. Check msconvert filters (remove activation/analyzer/mzWindow/scanTime).")
+}
+
 sample_classes <- ifelse(grepl("blank", tolower(basename(files))), "blank", "sample")
 pData(raw_data)$sample_group <- factor(sample_classes)
 
 # Optional: save raw_data
-saveRDS(raw_data, file.path(data_dir, "raw_data.rds"))
+# saveRDS(raw_data, file.path(data_dir, "raw_data.rds"))
 
 # ==== XCMS Processing ====
 cwp <- xcms::CentWaveParam(
   ppm = ppm,
   peakwidth = c(min_pw, max_pw),
   snthr = snthr,
-  prefilter = c(3, 1000),
+  prefilter = c(3, 300),            # slightly relaxed for robustness
   mzCenterFun = "wMeanApex3",
   integrate = 1,
-  mzdiff = mzdiff,
+  mzdiff = -0.001,
   noise = noise
 )
 
+cat("Detecting mass traces / peaks ...\n")
 xdata <- xcms::findChromPeaks(raw_data, param = cwp)
+cat("Chrom peaks found per sample:", paste(xcms::chromPeaks(xdata, bySample=TRUE) |> lengths(), collapse=", "), "\n")
+
 xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroups = sample_classes))
 xdata <- xcms::adjustRtime(xdata, param = xcms::PeakGroupsParam(minFraction = 0.5, smooth = "loess"))
 xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroups = sample_classes))
 xdata <- xcms::fillChromPeaks(xdata)
 
-saveRDS(xdata, file.path(data_dir, "xdata.rds"))
+# saveRDS(xdata, file.path(data_dir, "xdata.rds"))
 
 # ==== CAMERA Annotation ====
 xset <- as(xdata, "xcmsSet")
@@ -142,11 +163,10 @@ has_ms2_vec <- vapply(seq_len(nrow(annotated_peaks)), function(i){
 annotated_peaks$has_ms2 <- has_ms2_vec
 
 # ==== Save outputs ====
-out_csv <- file.path(data_dir, paste0(output_name, ".csv"))
+out_csv <- file.path(data_dir, paste0(Features_Matrix, ".csv"))
 utils::write.csv(annotated_peaks, file = out_csv, row.names = FALSE)
-saveRDS(an, file.path(data_dir, "camera_annotated.rds"))
 
-cat("SUCCESS: Wrote CSV to", out_csv, "\n")
+cat("SUCCESS: Wrote CSV to ", out_csv, "\n", sep="")
 '''
 
 @router.post("/xcms/start")
@@ -162,53 +182,42 @@ async def xcms_start(params: XcmsParams):
         RSCRIPT_BIN, str(r_path),
         f"--dir={str(data_dir)}",
         f"--polarity={params.polarity}",
-        f"--output={params.output_name}",
         f"--ppm={params.ppm}",
         f"--snr={params.snr}",
         f"--noise={params.noise}",
         f"--min_peakwidth={params.min_peakwidth}",
         f"--max_peakwidth={params.max_peakwidth}",
-        f"--mzdiff={params.mzdiff}",
     ]
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-    except FileNotFoundError:
+    async def stream():
         try:
-            r_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Rscript binary not found: {RSCRIPT_BIN}")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError:
+            yield f"❌ Rscript not found at {RSCRIPT_BIN}\n"
+            # cleanup
+            try: r_path.unlink(missing_ok=True)
+            except Exception: pass
+            return
 
-    try:
-        if params.timeout_sec and params.timeout_sec > 0:
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=params.timeout_sec)
-            except asyncio.TimeoutError:
-                proc.kill()
-                try:
-                    await proc.wait()
-                finally:
-                    raise HTTPException(
-                        status_code=504,
-                        detail=f"xcms run exceeded {params.timeout_sec}s and was terminated."
-                    )
-        else:
-            stdout, _ = await proc.communicate()
-    finally:
-        # best-effort cleanup of the temp R file
-        try:
-            r_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Optional timeout handling while streaming
+        done = False
+        async def reader_task():
+            async for chunk in proc.stdout:
+                yield chunk.decode(errors="ignore")
 
-    log_text = (stdout or b"").decode(errors="ignore")
-    if proc.returncode != 0:
-        tail = log_text[-2000:] if log_text else "No logs captured."
-        raise HTTPException(status_code=500, detail=f"xcms failed (exit {proc.returncode}).\n\n{tail}")
+        # We stream directly without wait_for so logs arrive as they are produced
+        async for line in proc.stdout:
+            yield line.decode(errors="ignore")
 
-    return {"ok": True, "output_name": params.output_name}
+        code = await proc.wait()
+        yield f"\n__XCMS_DONE__ EXIT_CODE={code}\n"
+
+        # cleanup the temp R file
+        try: r_path.unlink(missing_ok=True)
+        except Exception: pass
+
+    return StreamingResponse(stream(), media_type="text/plain; charset=utf-8")
