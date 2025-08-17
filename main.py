@@ -53,5 +53,11 @@ async def annotation_part(request: Request, directory: str, polarity: str, table
     return templates.TemplateResponse("annotation_part.html", ctx)
 
 
+@app.get("/Learn", response_class=HTMLResponse)
+async def Learn_Page(request: Request):
+    return templates.TemplateResponse("LearnPage.html", {"request": request})
+
+
+
 if __name__ == '__main__':
     uvicorn.run(app, host="127.0.0.1", port=8000)
