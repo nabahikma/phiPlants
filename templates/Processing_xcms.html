@@ -39,38 +39,37 @@
         <div class="pill">Polarity: <strong>{{ polarity }}</strong></div>
 
         <form id="xcmsForm">
-          <input type="hidden" id="directory" value="{{ directory }}">
-          <input type="hidden" id="polarity" value="{{ polarity }}">
+  <input type="hidden" id="directory" value="{{ directory }}">
+  <input type="hidden" id="polarity" value="{{ polarity }}">
 
-          <div class="row">
-            <div>
-              <label for="ppm">ppm</label>
-              <input type="number" id="ppm" step="1" min="1" value="5">
-            </div>
-            <div>
-              <label for="snr">S/N Ratio</label>
-              <input type="number" id="snr" step="1" min="1" value="10">
-            </div>
-            <div>
-              <label for="noise">Noise Level</label>
-              <input type="number" id="noise" step="10" min="0" value="30">
-            </div>
-          </div>
+  <div class="row">
+    <div>
+      <label for="ppm">ppm</label>
+      <input type="number" id="ppm" step="1" min="1" value="5">
+    </div>
+    <div>
+      <label for="snr">S/N Ratio</label>
+      <input type="number" id="snr" step="1" min="1" value="10">
+    </div>
+    <div>
+      <label for="noise">Noise Level</label>
+      <input type="number" id="noise" step="10" min="0" value="30">
+    </div>
+  </div>
 
-          <div class="row">
-            <div>
-              <label for="min_peakwidth">Min peakwidth (s)</label>
-              <input type="number" id="min_peakwidth" step="1" min="2" value="4">
-            </div>
-            <div>
-              <label for="max_peakwidth">Max peakwidth (s)</label>
-              <input type="number" id="max_peakwidth" step="1" min="4" value="40">
-            </div>
-          </div>
+  <div class="row">
+    <div>
+      <label for="min_peakwidth">Min peakwidth (s)</label>
+      <input type="number" id="min_peakwidth" step="1" min="2" value="4">
+    </div>
+    <div>
+      <label for="max_peakwidth">Max peakwidth (s)</label>
+      <input type="number" id="max_peakwidth" step="1" min="4" value="40">
+    </div>
+  </div>
 
-
-          <button type="submit" id="submitBtn" class="submit-btn">Start Processing 🧪</button>
-        </form>
+  <button type="submit" id="submitBtn" class="submit-btn">Start Processing 🧪</button>
+</form>
 
         <p id="status"></p>
       </div>
@@ -78,6 +77,7 @@
   </div>
 
   <!-- only the <script> part changes; keep your HTML/CSS form as-is -->
+
 <script>
   document.getElementById("xcmsForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -90,15 +90,21 @@
     };
 
     const payload = {
+      output_name: (document.getElementById("outputName").value || "Features_Matrix").trim(),
       directory: document.getElementById("directory").value,
       polarity: document.getElementById("polarity").value,
-      ppm: valNum("ppm", 15),
-      snr: valNum("snr", 6),
-      noise: valNum("noise", 0),
-      min_peakwidth: valNum("min_peakwidth", 2),
-      max_peakwidth: valNum("max_peakwidth", 30),
+      ppm: valNum("ppm", 5),
+      snr: valNum("snr", 10),
+      noise: valNum("noise", 30),
+      min_peakwidth: valNum("min_peakwidth", 4),
+      max_peakwidth: valNum("max_peakwidth", 40)
+      // mzdiff is fixed in R, not sent
     };
 
+    if (!payload.output_name) {
+      status.textContent = "❌ Please provide a features table name.";
+      return;
+    }
     if (!/^positive|negative$/.test(payload.polarity)) {
       status.textContent = "❌ Polarity must be 'positive' or 'negative'.";
       return;
@@ -160,6 +166,7 @@
     }
   });
 </script>
+
 
 </body>
 </html>

@@ -1,4 +1,3 @@
-# routers/xcms.py
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -22,7 +21,7 @@ class XcmsParams(BaseModel):
     noise: float = Field(ge=0)
     min_peakwidth: float = Field(2.0, gt=0)
     max_peakwidth: float = Field(30.0, gt=0)
-    mzdiff: float = Field(0.01)
+    # mzdiff is FIXED in R at -0.001 (no user control)
     timeout_sec: Optional[int] = Field(0, ge=0, description="0 = no timeout")
 
     @field_validator("output_name")
@@ -44,7 +43,6 @@ def _ensure_ready(params: XcmsParams) -> Path:
     d = Path(params.directory).expanduser().resolve()
     if not d.exists() or not d.is_dir():
         raise HTTPException(status_code=400, detail=f"Directory not found: {d}")
-    # quick presence check (case-insensitive)
     if not any(p.suffix.lower() == ".mzml" for p in d.glob("*")):
         raise HTTPException(status_code=400, detail=f"No mzML files found in: {d}")
     return d
@@ -78,7 +76,7 @@ snthr         <- as.numeric(get_arg("snr", 6))
 noise         <- as.numeric(get_arg("noise", 0))
 min_pw        <- as.numeric(get_arg("min_peakwidth", 2))
 max_pw        <- as.numeric(get_arg("max_peakwidth", 30))
-mzdiff        <- as.numeric(get_arg("mzdiff", 0.01))
+mzdiff        <- -0.001   # <-- FIXED here
 
 cat("PARAMS:\n",
     " dir=", data_dir, "\n",
@@ -110,18 +108,15 @@ if (ms1_count == 0) {
 sample_classes <- ifelse(grepl("blank", tolower(basename(files))), "blank", "sample")
 pData(raw_data)$sample_group <- factor(sample_classes)
 
-# Optional: save raw_data
-# saveRDS(raw_data, file.path(data_dir, "raw_data.rds"))
-
 # ==== XCMS Processing ====
 cwp <- xcms::CentWaveParam(
   ppm = ppm,
   peakwidth = c(min_pw, max_pw),
   snthr = snthr,
-  prefilter = c(3, 300),            # slightly relaxed for robustness
+  prefilter = c(3, 300),
   mzCenterFun = "wMeanApex3",
   integrate = 1,
-  mzdiff = -0.001,
+  mzdiff = mzdiff,     # fixed -0.001
   noise = noise
 )
 
@@ -133,8 +128,6 @@ xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroup
 xdata <- xcms::adjustRtime(xdata, param = xcms::PeakGroupsParam(minFraction = 0.5, smooth = "loess"))
 xdata <- xcms::groupChromPeaks(xdata, param = xcms::PeakDensityParam(sampleGroups = sample_classes))
 xdata <- xcms::fillChromPeaks(xdata)
-
-# saveRDS(xdata, file.path(data_dir, "xdata.rds"))
 
 # ==== CAMERA Annotation ====
 xset <- as(xdata, "xcmsSet")
@@ -163,7 +156,7 @@ has_ms2_vec <- vapply(seq_len(nrow(annotated_peaks)), function(i){
 annotated_peaks$has_ms2 <- has_ms2_vec
 
 # ==== Save outputs ====
-out_csv <- file.path(data_dir, paste0(Features_Matrix, ".csv"))
+out_csv <- file.path(data_dir, paste0(output_name, ".csv"))
 utils::write.csv(annotated_peaks, file = out_csv, row.names = FALSE)
 
 cat("SUCCESS: Wrote CSV to ", out_csv, "\n", sep="")
@@ -182,11 +175,13 @@ async def xcms_start(params: XcmsParams):
         RSCRIPT_BIN, str(r_path),
         f"--dir={str(data_dir)}",
         f"--polarity={params.polarity}",
+        f"--output={params.output_name}",
         f"--ppm={params.ppm}",
         f"--snr={params.snr}",
         f"--noise={params.noise}",
         f"--min_peakwidth={params.min_peakwidth}",
         f"--max_peakwidth={params.max_peakwidth}",
+        # no --mzdiff; it is fixed in R at -0.001
     ]
 
     async def stream():
@@ -198,25 +193,16 @@ async def xcms_start(params: XcmsParams):
             )
         except FileNotFoundError:
             yield f"❌ Rscript not found at {RSCRIPT_BIN}\n"
-            # cleanup
             try: r_path.unlink(missing_ok=True)
             except Exception: pass
             return
 
-        # Optional timeout handling while streaming
-        done = False
-        async def reader_task():
-            async for chunk in proc.stdout:
-                yield chunk.decode(errors="ignore")
-
-        # We stream directly without wait_for so logs arrive as they are produced
         async for line in proc.stdout:
             yield line.decode(errors="ignore")
 
         code = await proc.wait()
         yield f"\n__XCMS_DONE__ EXIT_CODE={code}\n"
 
-        # cleanup the temp R file
         try: r_path.unlink(missing_ok=True)
         except Exception: pass
 
