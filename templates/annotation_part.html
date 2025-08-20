@@ -2,18 +2,109 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Annotation Part</title>
+  <title>Annotation Step</title>
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon" />
   <style>
-    body { font-family: Arial, sans-serif; padding: 20px; }
-    .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f3f3f3; border:1px solid #ddd; margin-right:8px; }
-  </style>
+      :root { --bg:#e6f3f5; --btn:#007bff; --btn-hover:#0056b3; --border:#ddd; --text:#111; }
+    * { box-sizing:border-box; }
+    body, html { margin:0; padding:0; height:100%; font-family:Arial, sans-serif; color:var(--text); }
+    .container { display:flex; height:100%; }
+    .left-half { flex:1; background-image:url('/lefthalf.jpeg'); background-size:cover; background-position:center; }
+    .right-half { flex:1; background-color:var(--bg); display:flex; flex-direction:column; justify-content:center; align-items:center; padding:40px; }
+    h2 { margin:0 0 6px 0; }
+    h4 { margin:0 0 18px 0; font-weight:500; }
+    .form-container { width:100%; max-width:520px; background:white; border:1px solid var(--border); border-radius:16px; padding:20px; }
+    label { display:block; margin:10px 0 6px; font-weight:600; }
+    input[type="text"], input[type="number"] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:12px; font-size:16px; outline:none; }
+    .row { display:flex; gap:12px; }
+    .row > div { flex:1; }
+    .submit-btn { background:var(--btn); color:white; border:none; padding:14px; border-radius:22px; font-size:16px; cursor:pointer; width:100%; margin-top:16px; }
+    .submit-btn:hover { background:var(--btn-hover); }
+    .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f8f8f8; border:1px solid var(--border); margin:0 8px 12px 0; font-size:14px; }
+    #status { font-family: monospace; height: 300px; overflow-y: auto; background: #fff; border: 1px solid #ddd; padding: 10px; white-space: pre-wrap; }
+    .note { font-size:13px; color:#555; margin-top:6px; }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+            height: 100%;
+        }
+        .left-half {
+            flex: 1;
+            background-image: url('/static/lefthalf.jpeg');
+            background-size: cover;
+            background-position: center;
+        }
+        .right-half {
+            flex: 1;
+            background-color: #e6f3f5;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 40px;
+        }
+        .button {
+            background-color: white;
+            border: none;
+            padding: 15px 20px;
+            margin: 10px 0;
+            border-radius: 25px;
+            font-size: 24px;
+            color: #333;
+            text-align: left;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .button:hover {
+            background-color: #f0f0f0;
+        }
+        .button::after {
+            content: '>';
+            margin-left: 30px;
+            font-weight: bold;
+        }
+        h4 { margin:0 0 18px 0; font-weight:600; }
+       .form-container { width:100%; max-width:520px; background:white; border:1px solid var(--border); border-radius:16px; padding:20px; }
+       label { display:block; margin:10px 0 6px; font-weight:600; }
+       input[type="text"], input[type="number"] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:12px; font-size:16px; outline:none; }
+       .row { display:flex; gap:12px; }
+       .row > div { flex:1; }
+       .submit-btn { background:var(--btn); color:white; border:none; padding:14px; border-radius:22px; font-size:16px; cursor:pointer; width:100%; margin-top:16px; }
+       .submit-btn:hover { background:var(--btn-hover); }
+       .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f8f8f8; border:1px solid var(--border); margin:0 8px 12px 0; font-size:14px; }
+        #status { font-family: monospace; height: 300px; overflow-y: auto; background: #fff; border: 1px solid #ddd; padding: 10px; white-space: pre-wrap; }
+       .note { font-size:13px; color:#555; margin-top:6px; }
+    </style>
 </head>
 <body>
-  <h2>Annotation Step</h2>
-  <div class="pill">Directory: <strong>{{ directory }}</strong></div>
-  <div class="pill">Polarity: <strong>{{ polarity }}</strong></div>
-  <div class="pill">Features Table: <strong>{{ table }}</strong></div>
-
-  <p>Now you can proceed with annotation (mass matching, CAMERA outputs, DB joins, etc.).</p>
+    <div class="container">
+      <div class="left-half"></div>
+      <div class="right-half">
+        <h2>Annotation Step</h2>
+          <br>
+          <br>
+          <br>
+        <form id="annotationForm">
+            <div class="pill">Directory: <strong>{{ directory }}</strong></div>
+            <div class="pill">Polarity: <strong>{{ polarity }}</strong></div>
+            <h4>Now We Can Annotate the Features in our Features Matrix Using PlantsDB!</h4>
+            <h4>You Can Annotate The Features Using Analyte Lists; The analyte List Should be a *csv file* and Contains 'CompoundName' and 'MolecularFormula' columns!</h4>
+            <br>
+            <div>
+              <label for="AnalyteList">*(Optional) Analyte List Path (e.g C:\Desktop\Library.csv)</label>
+              <input type="text" id="analytelist">
+            </div>
+            <button type="submit" id="submitBtn" class="submit-btn">Start Annotation 🧪</button>
+        </form>
+        </div>
+    </div>
 </body>
 </html>
