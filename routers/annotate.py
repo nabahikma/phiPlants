@@ -1,327 +1,236 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Literal, Optional
 from pathlib import Path
-import asyncio
 import pandas as pd
 import duckdb
 import re
-import shlex
+import os
 
 router = APIRouter()
 
-# ====== Config ======
-PLANTDB_PARQUET = Path("data/moleculesdb.parquet").resolve()
-# Set absolute path on Windows if needed, e.g.:
-# RSCRIPT_BIN = r"C:\Program Files\R\R-4.4.1\bin\Rscript.exe"
-RSCRIPT_BIN = "Rscript"
+# === Config ===
+# Point this to your parquet DB (or set env var PLANTDB_PARQUET)
+PLANTDB_PARQUET = Path(
+    os.getenv("PLANTDB_PARQUET", r"C:\Users\Administrator\PycharmProjects\PlantResearch\data\moleculesdb.parquet")
+).resolve()
 
-H_ATOM = 1.007825  # as requested
+H_ATOM = 1.007825  # proton mass per your workflow
+MASS_TOL = 0.002   # ± 0.002 Da window for DB join
 
-# ====== Minimal ASCII-only R script for formula prediction ======
-R_MIN_SCRIPT = r"""
-suppressPackageStartupMessages({
-  load_or_install <- function(pkg){
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      install.packages(pkg, repos = "http://cran.us.r-project.org")
-    }
-    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
-  }
-  pkgs <- c("Rdisop")
-  invisible(lapply(pkgs, load_or_install))
-})
 
-args <- commandArgs(trailingOnly=TRUE)
-get_arg <- function(name, default=NULL) {
-  hit <- grep(paste0("^--", name, "="), args, value=TRUE)
-  if (length(hit) == 0) return(default)
-  sub(paste0("^--", name, "="), "", hit)
-}
-
-in_csv  <- get_arg("in")
-out_csv <- get_arg("out")
-if (is.null(in_csv) || !file.exists(in_csv)) stop(paste("Input CSV not found:", in_csv))
-if (is.null(out_csv)) stop("Missing --out")
-
-inp <- tryCatch(read.csv(in_csv, stringsAsFactors=FALSE, check.names=FALSE),
-                error=function(e) stop(paste("Cannot read input CSV:", e$message)))
-if (!all(c("id","mass") %in% names(inp))) stop("Input CSV must contain 'id' and 'mass'")
-
-extract_tab <- function(cand) {
-  if (is.null(cand)) return(NULL)
-  if (isS4(cand)) {
-    sn <- try(slotNames(cand), silent=TRUE)
-    if (!inherits(sn, "try-error") && "results" %in% sn) return(cand@results)
-  }
-  if (is.list(cand) && !is.null(cand$results)) return(cand$results)
-  if (is.data.frame(cand)) return(cand)
-  return(NULL)
-}
-
-predict_formula_one <- function(mass) {
-  if (is.na(mass)) return(NA_character_)
-  cand <- tryCatch(Rdisop::decomposeMass(mass, mzabs=0.005),
-                   error=function(e) NULL)
-  tab <- extract_tab(cand)
-  if (is.null(tab) || nrow(tab)==0) return(NA_character_)
-  if (!("exactmass" %in% names(tab)) && "mass" %in% names(tab)) tab$exactmass <- tab$mass
-  if ("dbd" %in% names(tab)) {
-    tab <- tab[!is.na(tab$dbd) & tab$dbd > 0, , drop=FALSE]
-  } else if ("RDBE" %in% names(tab)) {
-    tab <- tab[!is.na(tab$RDBE) & tab$RDBE > 0, , drop=FALSE]
-  }
-  if (nrow(tab)==0) return(NA_character_)
-  tab$err <- abs(tab$exactmass - mass)
-  tab <- tab[order(tab$err), , drop=FALSE]
-  tab$formula[1]
-}
-
-res <- data.frame(id = inp$id, Formula = NA_character_, stringsAsFactors=FALSE)
-n <- nrow(inp)
-for (i in seq_len(n)) {
-  res$Formula[i] <- predict_formula_one(as.numeric(inp$mass[i]))
-  if (i %% 1000 == 0) cat(".. Rdisop processed", i, "rows\n")
-}
-write.csv(res, out_csv, row.names=FALSE)
-"""
-
-# ====== Request model ======
-class AnnotParams(BaseModel):
-    directory: str = Field(min_length=1, description="Folder containing Features_Matrix.csv")
-    table: str = Field(min_length=1, description="Base name (no .csv), e.g., Features_Matrix")
+class AnnotSemiParams(BaseModel):
+    directory: str = Field(..., description="Folder that contains the features CSV")
+    table: str = Field(..., description="CSV base name without .csv (e.g., 'Features_Matrix')")
     polarity: Literal["positive", "negative"]
-    analyte_csv: Optional[str] = Field(
-        None, description="Optional analyte CSV with columns: MolecularFormula, ExactMass, CompoundName"
-    )
+    # optional: if your features file name differs, you can pass it in full:
+    features_csv_override: Optional[str] = None
 
-# ====== Helpers ======
-def _safe(p: str) -> Path:
-    return Path(p).expanduser().resolve()
 
-def _ensure_exists(path: Path, what: str):
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"{what} not found: {path}")
+ADDUCT_RE = re.compile(r"(\[[^\]]+\][+-]?\d*)\s+([\d\.]+)")
 
-def is_molecular_row(tag) -> bool:
+def split_adducts(adduct_str: str):
     """
-    Keep rows where isotopes is:
-      - empty/NA, OR
-      - a molecular-ion pattern "[number][M]" optionally followed by +/- (e.g., "[10][M]+", "[1][M]-", "[2][M]")
+    From CAMERA 'adduct' column: extract pairs like "[M+H]+ 123.456"
+    Returns list of (adduct_token, mass_value_string)
+    """
+    if adduct_str is None:
+        return []
+    s = str(adduct_str)
+    if not s or s.strip() == "" or s.strip().lower() == "na":
+        return []
+    return ADDUCT_RE.findall(s)
+
+
+def is_molecular_ion_isotope_tag(tag: Optional[str]) -> bool:
+    """
+    True if isotopes is empty/NA, or a molecular-ion tag like "[10][M]" or "[2][M]+".
+    We treat these rows as OK to default to [M+H]+ / [M-H]- when adduct is missing.
     """
     if tag is None:
         return True
     s = str(tag).strip()
-    if s == "":
+    if s == "" or s.lower() == "na":
         return True
+    # [number][M] optionally followed by +/-
     return re.match(r"^\[\d+\]\[M\][+-]?$", s) is not None
 
-# ====== Core streaming worker ======
-def _make_stream(params: AnnotParams):
+
+def _safe_path(p: str) -> Path:
+    return Path(p).expanduser().resolve()
+
+
+def _fmt(x) -> str:
+    try:
+        return str(x)
+    except Exception:
+        return repr(x)
+
+
+def _build_stream(params: AnnotSemiParams):
     async def stream():
-        directory = _safe(params.directory)
-        _ensure_exists(directory, "Directory")
+        directory = _safe_path(params.directory)
+        features_csv = (
+            _safe_path(params.features_csv_override)
+            if params.features_csv_override
+            else (directory / f"{params.table}.csv").resolve()
+        )
+        out_csv = (directory / f"{params.table}_Annotated.csv").resolve()
 
-        features_csv = (directory / f"{params.table}.csv").resolve()
-        _ensure_exists(features_csv, "Features CSV")
-        _ensure_exists(PLANTDB_PARQUET, "DB Parquet")
+        # Pre-flight checks BEFORE yielding (safe to stop with messages)
+        if not directory.exists():
+            yield f"❌ Directory not found: {directory}\n"
+            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+            return
+        if not features_csv.exists():
+            yield f"❌ Features CSV not found: {features_csv}\n"
+            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+            return
 
-        analyte_path: Optional[Path] = None
-        if params.analyte_csv:
-            analyte_path = _safe(params.analyte_csv)
-            _ensure_exists(analyte_path, "Analyte CSV")
+        db_exists = PLANTDB_PARQUET.exists()
+        if not db_exists:
+            yield f"⚠ DB parquet not found: {PLANTDB_PARQUET}\n"
+            yield "   → Will skip Candidates join and still produce output.\n"
 
-        ft_ready_csv    = (directory / "FT_Ready.csv").resolve()
-        r_in_csv        = (directory / f"{params.table}__r_in.csv").resolve()
-        r_out_csv       = (directory / f"{params.table}__r_out.csv").resolve()
-        r_src           = (directory / f"{params.table}__r.R").resolve()
-        fm_ready_csv    = (directory / "Features_Matrix_Ready.csv").resolve()
-        fm_annot_csv    = (directory / "Features_Matrix_Ready_Annotated.csv").resolve()
-
+        # Begin processing
+        yield "=== Semi-automated annotation ===\n"
+        yield f"Loading features: {features_csv}\n"
         try:
-            # ---------- Load & filter ----------
-            yield "=== Step 1: Load & filter to molecular ions ===\n"
-            yield f"Loading: {features_csv}\n"
             df = pd.read_csv(features_csv)
+        except Exception as e:
+            yield f"❌ Could not read CSV: {e}\n"
+            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+            return
 
-            # Ensure mz exists
-            if "mz" not in df.columns:
-                yield "❌ Features CSV must contain 'mz' column.\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-                return
+        # Ensure mz exists
+        if "mz" not in df.columns:
+            yield "❌ CSV must include 'mz' column.\n"
+            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+            return
 
-            # RT → minutes column
-            if "RT_min" not in df.columns:
-                if "rt" in df.columns:
-                    df["RT_min"] = pd.to_numeric(df["rt"], errors="coerce") / 60.0
-                elif "RT" in df.columns:
-                    df["RT_min"] = pd.to_numeric(df["RT"], errors="coerce")
-                else:
-                    df["RT_min"] = pd.NA
+        # Ensure isotopes column exists (optional)
+        if "isotopes" not in df.columns:
+            df["isotopes"] = ""
 
-            # Filter isotopes to empty or [number][M](+/-)
-            if "isotopes" in df.columns:
-                keep = df["isotopes"].apply(is_molecular_row)
-                kept, dropped = int(keep.sum()), int((~keep).sum())
-                yield f"Isotope filter: kept {kept}; dropped {dropped}\n"
-                df = df[keep].copy()
+        # RT in minutes
+        if "RT_min" not in df.columns:
+            if "rt" in df.columns:
+                df["RT_min"] = pd.to_numeric(df["rt"], errors="coerce") / 60.0
+            elif "RT" in df.columns:
+                df["RT_min"] = pd.to_numeric(df["RT"], errors="coerce")
             else:
-                yield "No 'isotopes' column; keeping all rows as molecular ions.\n"
+                df["RT_min"] = pd.NA
 
-            if len(df) == 0:
-                yield "No rows remain after filtering. Writing empty outputs.\n"
-                pd.DataFrame(columns=["RT_min","mz","ExactMass"]).to_csv(ft_ready_csv, index=False)
-                pd.DataFrame(columns=["RT_min","mz","ExactMass","Formula"]).to_csv(fm_ready_csv, index=False)
-                pd.DataFrame(columns=["RT_min","mz","ExactMass","Formula","Candidates","AnalyteList"]).to_csv(fm_annot_csv, index=False)
-                yield f"✅ Wrote: {ft_ready_csv}\n"
-                yield f"✅ Wrote: {fm_ready_csv}\n"
-                yield f"✅ Wrote: {fm_annot_csv}\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=0\n"
-                return
-
-            # ---------- ExactMass by polarity (using H_ATOM as requested) ----------
-            yield "=== Step 2: Compute ExactMass from mz and polarity ===\n"
-            if params.polarity == "positive":
-                df["ExactMass"] = pd.to_numeric(df["mz"], errors="coerce") - H_ATOM
+        # Split CAMERA adducts and keep FIRST pair only
+        yield "Splitting CAMERA adducts and picking first...\n"
+        adduct_1 = []
+        mass_1 = []
+        for s in df.get("adduct", "").astype(str).tolist():
+            pairs = split_adducts(s)
+            if pairs:
+                a, m = pairs[0]
+                adduct_1.append(a)
+                try:
+                    mass_1.append(float(m))
+                except Exception:
+                    mass_1.append(float("nan"))
             else:
-                df["ExactMass"] = pd.to_numeric(df["mz"], errors="coerce") + H_ATOM
+                adduct_1.append("")
+                mass_1.append(float("nan"))
 
-            before = len(df)
-            df = df[df["ExactMass"].notna()].copy()
-            after = len(df)
-            yield f"ExactMass non-null: {after} / {before}\n"
-            try:
-                prev = df[["mz","RT_min","ExactMass"]].head(5).to_string(index=False)
-                yield "Preview (mz, RT_min, ExactMass):\n" + prev + "\n"
-            except Exception:
-                pass
+        df["adduct_1"] = adduct_1
+        df["adduct_mass_1"] = mass_1
 
-            # Save FT_Ready.csv
-            df_ready = df.copy()
-            df_ready[["RT_min","mz","ExactMass"]].to_csv(ft_ready_csv, index=False)
-            yield f"✅ Wrote: {ft_ready_csv}\n"
+        # Default adduct & ExactMass
+        yield "Applying default adducts where appropriate and computing ExactMass...\n"
+        pol = params.polarity
+        mz = pd.to_numeric(df["mz"], errors="coerce")
 
-            # ---------- Rdisop formulas ----------
-            yield "=== Step 3: Rdisop formula prediction ===\n"
-            df_ready = df_ready.reset_index(drop=True)
-            df_ready["_rid"] = df_ready.index + 1
-            r_in = df_ready[["_rid","ExactMass"]].rename(columns={"_rid":"id","ExactMass":"mass"})
-            r_in.to_csv(r_in_csv, index=False)
-            r_src.write_text(R_MIN_SCRIPT, encoding="utf-8")
-            yield f"Wrote R input: {r_in_csv}\n"
-            yield f"Wrote R script: {r_src}\n"
+        # Start ExactMass with NaN; fill from adduct_mass_1 if present
+        df["ExactMass"] = pd.Series([pd.NA] * len(df), dtype="float64")
 
-            cmd = [RSCRIPT_BIN, "--encoding=utf8", str(r_src), f"--in={r_in_csv}", f"--out={r_out_csv}"]
-            yield "Command: " + " ".join(shlex.quote(p) for p in cmd) + "\n"
+        # Case 1: first adduct mass available -> trust CAMERA value
+        has_mass = pd.notna(df["adduct_mass_1"])
+        df.loc[has_mass, "ExactMass"] = df.loc[has_mass, "adduct_mass_1"]
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-            except FileNotFoundError:
-                yield f"❌ Rscript not found: {RSCRIPT_BIN}\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-                return
+        # Case 2: no adduct mass AND row is eligible for default (not an isotope peak)
+        need_default = (~has_mass) & df["isotopes"].apply(is_molecular_ion_isotope_tag)
+        if pol == "positive":
+            df.loc[need_default, "adduct_1"] = df.loc[need_default, "adduct_1"].replace("", "[M+H]+")
+            df.loc[need_default, "ExactMass"] = mz[need_default] - H_ATOM
+        else:
+            df.loc[need_default, "adduct_1"] = df.loc[need_default, "adduct_1"].replace("", "[M-H]-")
+            df.loc[need_default, "ExactMass"] = mz[need_default] + H_ATOM
 
-            async for chunk in proc.stdout:
-                yield chunk.decode(errors="ignore")
-            r_code = await proc.wait()
-            if r_code != 0:
-                yield f"❌ Rdisop failed (exit {r_code}).\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-                return
+        # Report stats
+        n_total = len(df)
+        n_from_cam = int(has_mass.sum())
+        n_defaulted = int(need_default.sum())
+        n_blank = int(df["ExactMass"].isna().sum())
+        yield f"Rows: total={n_total}, from CAMERA mass={n_from_cam}, defaulted={n_defaulted}, still blank={n_blank}\n"
 
-            if not r_out_csv.exists():
-                yield f"❌ Missing R output: {r_out_csv}\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-                return
+        # Build output frame: keep intensities too
+        intensity_cols = [c for c in df.columns if re.search(r"(?i)(intensity|into|maxo|area)", c)]
+        cols_out = ["RT_min", "mz", "adduct_1", "ExactMass"] + intensity_cols
 
-            # Merge Formula -> Features_Matrix_Ready.csv
-            yield "=== Step 4: Merge formulas and write Features_Matrix_Ready.csv ===\n"
-            rform = pd.read_csv(r_out_csv)  # columns: id, Formula
-            if not {"id","Formula"}.issubset(rform.columns):
-                yield "❌ R output must contain 'id' and 'Formula'.\n"
-                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-                return
-            rform = rform.rename(columns={"id":"_rid"})
-            df_ready = df_ready.merge(rform, on="_rid", how="left")
+        out = df.copy()
+        out = out[cols_out].copy()
 
-            # Keep RT_min, mz, ExactMass, Formula + intensity columns
-            intensity_cols = [c for c in df.columns if re.search(r"(?i)(intensity|into|maxo|area)", c)]
-            cols_out = ["RT_min","mz","ExactMass","Formula"] + intensity_cols
-            df_ready[cols_out].to_csv(fm_ready_csv, index=False)
-            yield f"✅ Wrote: {fm_ready_csv}\n"
-
-            # ---------- Join with DB + optional analyte list ----------
-            yield "=== Step 5: Join with DB and Analyte list ===\n"
+        # Annotate with DB Candidates (±0.002 Da on ExactMass), if DB exists
+        if db_exists:
+            yield f"Joining DB parquet (±{MASS_TOL} Da)...\n"
             con = duckdb.connect()
-            con.register("fm", df_ready[cols_out])  # RT_min, mz, ExactMass, Formula, intensities...
+            con.register("ft", out[out["ExactMass"].notna()].copy())
 
             db_path_sql = str(PLANTDB_PARQUET).replace("'", "''")
             con.execute(f"""
                 CREATE OR REPLACE VIEW mols AS
-                SELECT * FROM read_parquet('{db_path_sql}')
+                SELECT CompoundName, MolecularFormula, ExactMass
+                FROM read_parquet('{db_path_sql}')
+                WHERE ExactMass IS NOT NULL
             """)
 
-            con.execute("""
-                CREATE OR REPLACE VIEW dbagg AS
-                SELECT MolecularFormula AS formula,
-                       string_agg(CompoundName, ' / ') AS Candidates
-                FROM mols
-                WHERE MolecularFormula IS NOT NULL
-                GROUP BY MolecularFormula
-            """)
+            # Find candidates within mass tolerance, aggregate names
+            cand_df = con.execute(f"""
+                WITH hits AS (
+                    SELECT
+                        ft.ROW_NUMBER() OVER () AS rid,
+                        ft.ExactMass AS q_mass,
+                        mols.CompoundName,
+                        mols.ExactMass  AS db_mass,
+                        abs(mols.ExactMass - ft.ExactMass) AS dm
+                    FROM ft
+                    JOIN mols
+                      ON abs(mols.ExactMass - ft.ExactMass) <= {MASS_TOL}
+                )
+                SELECT q_mass,
+                       string_agg(CompoundName, ' / ' ORDER BY dm, CompoundName) AS Candidates
+                FROM hits
+                GROUP BY q_mass
+            """).fetch_df()
 
-            analyte_join_sql = ""
-            analyte_sel_sql  = ""
-            if analyte_path:
-                analyte_path_sql = str(analyte_path).replace("'", "''")
-                con.execute(f"""
-                    CREATE OR REPLACE VIEW analyte AS
-                    SELECT * FROM read_csv_auto('{analyte_path_sql}', HEADER=TRUE)
-                """)
-                con.execute("""
-                    CREATE OR REPLACE VIEW aagg AS
-                    SELECT MolecularFormula AS formula,
-                           string_agg(CompoundName, ' / ') AS AnalyteList
-                    FROM analyte
-                    WHERE MolecularFormula IS NOT NULL
-                    GROUP BY MolecularFormula
-                """)
-                analyte_join_sql = "LEFT JOIN aagg A ON A.formula = fm.Formula"
-                analyte_sel_sql  = ", A.AnalyteList"
+            out = out.merge(cand_df, left_on="ExactMass", right_on="q_mass", how="left").drop(columns=["q_mass"])
+        else:
+            out["Candidates"] = pd.NA
 
-            sql = f"""
-            SELECT
-              fm.RT_min,
-              fm.mz,
-              fm.ExactMass,
-              fm.Formula,
-              {"fm.* EXCLUDE (RT_min, mz, ExactMass, Formula)," if len(intensity_cols) > 0 else ""}
-              D.Candidates
-              {analyte_sel_sql}
-            FROM fm
-            LEFT JOIN dbagg D ON D.formula = fm.Formula
-            {analyte_join_sql}
-            """
-            out_df = con.execute(sql).fetch_df()
-            out_df.to_csv(fm_annot_csv, index=False)
+        # Save final
+        out.to_csv(out_csv, index=False)
+        yield f"✅ Wrote: {out_csv}\n"
+        yield "__ANNOT_DONE__ EXIT_CODE=0\n"
 
-            yield f"✅ Wrote: {fm_annot_csv}\n"
-            yield "__ANNOT_DONE__ EXIT_CODE=0\n"
-        except Exception as e:
-            yield f"❌ Error: {e}\n"
-            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
     return stream
 
-# ====== Endpoints ======
-@router.post("/annotation/run")
-async def annotation_run(params: AnnotParams):
-    return StreamingResponse(_make_stream(params)(), media_type="text/plain; charset=utf-8")
 
-# Back-compat alias if your page still posts to /annotate/run
-@router.post("/annotate/run")
-async def annotate_run_alias(params: AnnotParams):
-    return StreamingResponse(_make_stream(params)(), media_type="text/plain; charset=utf-8")
+@router.post("/annotation/semi-run")
+async def annotation_semi_run(params: AnnotSemiParams):
+    """
+    Semi-automated annotation:
+      - Split CAMERA adducts; pick first adduct+mass
+      - Default to [M+H]+ / [M-H]- when no adduct and not an isotope peak
+      - ExactMass from adduct mass or neutral mz ± 1.007825
+      - Join to Parquet DB within ±0.002 Da → Candidates
+      - Writes <table>_Annotated.csv
+      - Streams logs with __ANNOT_DONE__ EXIT_CODE=*
+    """
+    return StreamingResponse(_build_stream(params)(), media_type="text/plain; charset=utf-8")
