@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Tuple
 from pathlib import Path
 import asyncio
 import pandas as pd
@@ -12,27 +12,81 @@ import shlex
 
 router = APIRouter()
 
-# ====== Config ======
+# ========= Config =========
 PLANTDB_PARQUET = Path("data/moleculesdb.parquet").resolve()
-# If Rscript isn't in PATH on Windows, set absolute path, e.g.:
+# If Rscript isn't in PATH on Windows, set the full path, e.g.:
 # RSCRIPT_BIN = r"C:\Program Files\R\R-4.4.1\bin\Rscript.exe"
 RSCRIPT_BIN = "Rscript"
 
-# Adduct mass shifts (Da) and charge
-ADDUCT_INFO = {
-    "[M+H]+":   (1.007276, +1),
-    "[M+Na]+":  (22.989218, +1),
-    "[M+K]+":   (38.963158, +1),
-    "[M+NH4]+": (18.033823, +1),
-    "[M+2H]2+": (2 * 1.007276, +2),
+# Monoisotopic constants (Da)
+PROTON = 1.007276
+NA_ION = 22.989218
+K_ION  = 38.963158
+NH4_ION = 18.033823
+CL_ION = 34.969402
+BR_ION = 78.918885
+H2O = 18.010565
+ACN = 41.026549      # CH3CN
+MEOH = 32.026215     # CH3OH
+FORMIC_ACID = 46.005480
+ACETIC_ACID = 60.021129
+FORMATE = 45.017444  # HCOO- anion mass? Often use FA-H net ~59? We will use FA pathway via acid - H+
+ACETATE = 59.013851  # CH3COO-
 
-    "[M-H]-":    (-1.007276, -1),
-    "[M+Cl]-":   (34.969402, -1),
-    "[M+FA-H]-": (46.00548 - 1.007276, -1),
-    "[M+HCOO]-": (46.00548 - 1.007276, -1),
+# ========= Expanded adduct list (shift, z, n) =========
+# shift is net adduct mass in Da (what you add/subtract to n*M before dividing by |z|)
+# z is the integer charge (sign matters), n is stoichiometry (e.g., 2 for [2M+H]+)
+ADDUCTS: Dict[str, Tuple[float, int, int]] = {
+    # --- Positive, monomer (n=1) ---
+    "[M+H]+":        (PROTON, +1, 1),
+    "[M+Na]+":       (NA_ION, +1, 1),
+    "[M+K]+":        (K_ION, +1, 1),
+    "[M+NH4]+":      (NH4_ION, +1, 1),
+    "[M+2H]2+":      (2*PROTON, +2, 1),
+    "[M+3H]3+":      (3*PROTON, +3, 1),
+
+    "[M+ACN+H]+":    (ACN + PROTON, +1, 1),
+    "[M+CH3OH+H]+":  (MEOH + PROTON, +1, 1),
+    "[M+H-H2O]+":    (PROTON - H2O, +1, 1),
+    "[M+Na+ACN]+":   (NA_ION + ACN, +1, 1),
+
+    # --- Positive, dimers (n=2) ---
+    "[2M+H]+":       (PROTON, +1, 2),
+    "[2M+Na]+":      (NA_ION, +1, 2),
+    "[2M+K]+":       (K_ION, +1, 2),
+    "[2M+NH4]+":     (NH4_ION, +1, 2),
+    "[2M+ACN+H]+":   (ACN + PROTON, +1, 2),
+
+    # --- Positive, trimers (n=3) ---
+    "[3M+H]+":       (PROTON, +1, 3),
+    "[3M+Na]+":      (NA_ION, +1, 3),
+
+    # --- Negative, monomer (n=1) ---
+    "[M-H]-":        (-PROTON, -1, 1),
+    "[M-2H]2-":      (-2*PROTON, -2, 1),
+    "[M+Cl]-":       (CL_ION, -1, 1),
+    "[M+Br]-":       (BR_ION, -1, 1),
+
+    # Formate / formic acid paths
+    "[M+FA-H]-":     (FORMIC_ACID - PROTON, -1, 1),  # common notation
+    "[M+HCOO]-":     (FORMATE, -1, 1),
+
+    # Acetate / acetic acid paths
+    "[M+Ac-H]-":     (ACETIC_ACID - PROTON, -1, 1),
+    "[M+CH3COO]-":   (ACETATE, -1, 1),
+
+    # --- Negative, dimers (n=2) ---
+    "[2M-H]-":       (-PROTON, -1, 2),
+    "[2M+Cl]-":      (CL_ION, -1, 2),
+    "[2M+FA-H]-":    (FORMIC_ACID - PROTON, -1, 2),
+    "[2M+HCOO]-":    (FORMATE, -1, 2),
+    "[2M+Ac-H]-":    (ACETIC_ACID - PROTON, -1, 2),
+
+    # --- Negative, trimers (n=3) ---
+    "[3M-H]-":       (-PROTON, -1, 3),
 }
 
-# ====== Minimal ASCII-only R script for formula prediction ======
+# ========= Minimal ASCII-only R script (Rdisop only) =========
 R_MIN_SCRIPT = r"""
 suppressPackageStartupMessages({
   load_or_install <- function(pkg){
@@ -74,7 +128,8 @@ extract_tab <- function(cand) {
 
 predict_formula_one <- function(mass) {
   if (is.na(mass)) return(NA_character_)
-  cand <- tryCatch(Rdisop::decomposeMass(mass, mzabs=0.005, elements=c(C=0,H=0,N=0,O=0,P=0,S=0)),
+  # No 'elements=' constraint: let Rdisop search fully, then filter DBE>0
+  cand <- tryCatch(Rdisop::decomposeMass(mass, mzabs=0.005),
                    error=function(e) NULL)
   tab <- extract_tab(cand)
   if (is.null(tab) || nrow(tab)==0) return(NA_character_)
@@ -99,7 +154,7 @@ for (i in seq_len(n)) {
 write.csv(res, out_csv, row.names=FALSE)
 """
 
-# ====== Request model ======
+# ========= Request model =========
 class AnnotParams(BaseModel):
     directory: str = Field(min_length=1, description="Folder containing Features CSV")
     table: str = Field(min_length=1, description="Base name (no .csv), e.g., Features_Matrix")
@@ -108,7 +163,7 @@ class AnnotParams(BaseModel):
         None, description="Optional analyte CSV with columns: MolecularFormula, ExactMass, CompoundName"
     )
 
-# ====== Helpers ======
+# ========= Helpers =========
 def _safe(p: str) -> Path:
     return Path(p).expanduser().resolve()
 
@@ -124,15 +179,17 @@ def choose_adduct(raw_adduct: Optional[str], polarity: str) -> str:
     return "[M+H]+" if polarity == "positive" else "[M-H]-"
 
 def neutral_mass_from_mz(mz_val, adduct: str) -> Optional[float]:
-    info = ADDUCT_INFO.get(adduct)
+    """
+    General: m/z = (n*M + shift) / |z|  =>  M = (|z|*m/z - shift) / n
+    """
+    if adduct not in ADDUCTS:
+        return None
+    shift, z, n = ADDUCTS[adduct]
     try:
         mz = float(mz_val)
     except Exception:
         return None
-    if not info:
-        return None
-    shift, z = info
-    return (abs(z) * mz - shift) / abs(z)
+    return ((abs(z) * mz) - shift) / max(n, 1)
 
 def is_molecular_isotope_tag(tag: Optional[str]) -> bool:
     """Keep empty/NA or tags like [M]+ / [M]- / [10][M]+ ; drop others (e.g., [M+1]+)."""
@@ -143,7 +200,7 @@ def is_molecular_isotope_tag(tag: Optional[str]) -> bool:
         return True
     return re.match(r"^\[\d*\]\[M\][+-]?$", s) is not None
 
-# ====== Endpoint (two aliases for convenience) ======
+# ========= Core streaming worker =========
 def _make_stream(params: AnnotParams):
     async def stream():
         directory = _safe(params.directory)
@@ -151,7 +208,6 @@ def _make_stream(params: AnnotParams):
 
         features_csv = (directory / f"{params.table}.csv").resolve()
         _ensure_exists(features_csv, "Features CSV")
-
         _ensure_exists(PLANTDB_PARQUET, "DB Parquet")
 
         analyte_path: Optional[Path] = None
@@ -212,6 +268,22 @@ def _make_stream(params: AnnotParams):
             ]
             df["ExactMass"] = [neutral_mass_from_mz(df.at[i, "mz"], df.at[i, "adduct_used"]) for i in df.index]
 
+            # Drop NA ExactMass, log status and preview
+            before = len(df)
+            df = df[pd.to_numeric(df["ExactMass"], errors="coerce").notna()].copy()
+            after = len(df)
+            yield f"ExactMass non-null: {after} / {before}\n"
+            try:
+                prev = df[["mz","adduct_used","ExactMass"]].head(5).to_string(index=False)
+                yield "Preview (mz, adduct_used, ExactMass):\n" + prev + "\n"
+            except Exception:
+                pass
+
+            if after == 0:
+                yield "No valid ExactMass values to submit to R. Aborting.\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+                return
+
             # Prepare compact CSV for Rdisop (id,mass)
             df["_rid"] = range(1, len(df) + 1)
             masses_for_r = df[["_rid", "ExactMass"]].rename(columns={"_rid": "id", "ExactMass": "mass"})
@@ -267,12 +339,19 @@ def _make_stream(params: AnnotParams):
             # ---------- DuckDB joins (DB + optional analyte list) ----------
             yield "=== Python: joining with DB & analyte list ===\n"
             con = duckdb.connect()
-            con.execute("CREATE OR REPLACE VIEW feats AS SELECT * FROM df_with")
-            con.execute("CREATE OR REPLACE VIEW mols  AS SELECT * FROM read_parquet(?)", [str(PLANTDB_PARQUET)])
+            con.register("feats", df_with)  # register pandas DF explicitly
+
+            # inline file paths safely (escape single quotes)
+            db_path_sql = str(PLANTDB_PARQUET).replace("'", "''")
+            con.execute(f"""
+                CREATE OR REPLACE VIEW mols AS
+                SELECT * FROM read_parquet('{db_path_sql}')
+            """)
 
             con.execute("""
                 CREATE OR REPLACE VIEW dbagg AS
-                SELECT MolecularFormula AS formula, string_agg(CompoundName, ' / ') AS Candidates
+                SELECT MolecularFormula AS formula,
+                       string_agg(CompoundName, ' / ') AS Candidates
                 FROM mols
                 WHERE MolecularFormula IS NOT NULL
                 GROUP BY MolecularFormula
@@ -282,10 +361,15 @@ def _make_stream(params: AnnotParams):
             analyte_sel_sql  = ""
             if analyte_path:
                 analyte_name = analyte_path.stem
-                con.execute("CREATE OR REPLACE VIEW analyte AS SELECT * FROM read_csv_auto(?, HEADER=TRUE)", [str(analyte_path)])
+                analyte_path_sql = str(analyte_path).replace("'", "''")
+                con.execute(f"""
+                    CREATE OR REPLACE VIEW analyte AS
+                    SELECT * FROM read_csv_auto('{analyte_path_sql}', HEADER=TRUE)
+                """)
                 con.execute(f"""
                     CREATE OR REPLACE VIEW aagg AS
-                    SELECT MolecularFormula AS formula, string_agg(CompoundName, ' / ') AS "{analyte_name}"
+                    SELECT MolecularFormula AS formula,
+                           string_agg(CompoundName, ' / ') AS "{analyte_name}"
                     FROM analyte
                     WHERE MolecularFormula IS NOT NULL
                     GROUP BY MolecularFormula
@@ -318,11 +402,12 @@ def _make_stream(params: AnnotParams):
             yield "__ANNOT_DONE__ EXIT_CODE=1\n"
     return stream
 
+# ========= Endpoints =========
 @router.post("/annotation/run")
 async def annotation_run(params: AnnotParams):
     return StreamingResponse(_make_stream(params)(), media_type="text/plain; charset=utf-8")
 
-# Back-compat alias if your page still calls /annotate/run
+# Back-compat alias if your page still posts to /annotate/run
 @router.post("/annotate/run")
 async def annotate_run_alias(params: AnnotParams):
     return StreamingResponse(_make_stream(params)(), media_type="text/plain; charset=utf-8")
