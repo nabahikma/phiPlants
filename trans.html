@@ -23,7 +23,21 @@
     <div class="left-half"></div>
     <div class="right-half">
         <h1>Convert Raw (.d) to mzML</h1>
+        <p>Annotation in processing...
+=== Annotation (Rdisop) started ===
+Rdisop annotation starting...
+Features: C:\Users\Administrator\Desktop\CP\Positive\Test\Features_Matrix.csv
+Polarity: positive
+Out: C:\Users\Administrator\Desktop\CP\Positive\Test\Features_Matrix__rdisop_stage.csv
+Dropping 589 non-[M]+/- isotope rows
+Error in `$<-.data.frame`(`*tmp*`, adduct_used, value = NA_character_) :
+  replacement has 1 row, data has 0
+Calls: $<- -> $<-.data.frame
+Execution halted
+❌ R stage failed (exit 1).
+__ANNOT_DONE__ EXIT_CODE=1
 
+❌ Annotation failed. See logs above.</p>
         <!-- Removed enctype because we’re not uploading files; not harmful if left -->
         <form id="msconvert-form" action="/run-msconvert/" method="post">
             <label for="polarity">Polarity (e.g., positive or negative):</label>
