@@ -4,15 +4,18 @@ from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from typing import Literal
-
+from fastapi.responses import PlainTextResponse
+import csv
+from pathlib import Path
 # Routers
-from routers import msconvert, xcms
+from routers import msconvert, xcms, annotate
 
 app = FastAPI()
 
 # Include routers
 app.include_router(msconvert.router)
 app.include_router(xcms.router)
+app.include_router(annotate.router)
 
 # Templates & static
 templates = Jinja2Templates(directory="templates")
@@ -57,6 +60,13 @@ async def annotation_part(request: Request, directory: str, polarity: str, table
 async def Learn_Page(request: Request):
     return templates.TemplateResponse("LearnPage.html", {"request": request})
 
+
+@app.get("/static-proxy", response_class=PlainTextResponse)
+async def static_proxy(directory: str, file: str):
+    p = Path(directory).expanduser().resolve() / file
+    if not p.exists():
+        return PlainTextResponse("Not found", status_code=404)
+    return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/csv; charset=utf-8")
 
 
 if __name__ == '__main__':
