@@ -1,39 +1,39 @@
-# routers/annotate.py
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from pathlib import Path
 import asyncio
-import tempfile
-import json
+import pandas as pd
 import duckdb
+import re
+import shlex
+import subprocess
 
 router = APIRouter()
 
+# ====== Config ======
 PLANTDB_PARQUET = Path("data/moleculesdb.parquet").resolve()
-RSCRIPT_BIN = "Rscript"  # set absolute path if needed on Windows
+# Set absolute path on Windows if Rscript isn't in PATH, e.g.:
+# RSCRIPT_BIN = r"C:\Program Files\R\R-4.4.1\bin\Rscript.exe"
+RSCRIPT_BIN = "Rscript"
 
+# Adduct mass shifts (Da) and charge
+ADDUCT_INFO = {
+    "[M+H]+":   (1.007276, +1),
+    "[M+Na]+":  (22.989218, +1),
+    "[M+K]+":   (38.963158, +1),
+    "[M+NH4]+": (18.033823, +1),
+    "[M+2H]2+": (2 * 1.007276, +2),
 
-class AnnotParams(BaseModel):
-    directory: str = Field(min_length=1, description="Folder where Features_Matrix.csv lives")
-    table: str = Field(min_length=1, description="Base name of features CSV (no .csv). E.g., Features_Matrix")
-    polarity: Literal["positive", "negative"]
-    analyte_csv: Optional[str] = Field(
-        None, description="Optional analyte CSV with columns: MolecularFormula, ExactMass, CompoundName"
-    )
+    "[M-H]-":    (-1.007276, -1),
+    "[M+Cl]-":   (34.969402, -1),
+    "[M+FA-H]-": (46.00548 - 1.007276, -1),
+    "[M+HCOO]-": (46.00548 - 1.007276, -1),
+}
 
-
-def _safe(p: str) -> Path:
-    return Path(p).expanduser().resolve()
-
-
-def _ensure_exists(path: Path, what: str):
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"{what} not found: {path}")
-
-
-R_SCRIPT = r'''
+# ====== Minimal R script (ASCII only) for formula prediction ======
+R_MIN_SCRIPT = r"""
 suppressPackageStartupMessages({
   load_or_install <- function(pkg){
     if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -52,228 +52,228 @@ get_arg <- function(name, default=NULL) {
   sub(paste0("^--", name, "="), "", hit)
 }
 
-features_csv <- get_arg("features")
-polarity     <- get_arg("polarity", "positive")
-out_csv      <- get_arg("out")
+in_csv  <- get_arg("in")
+out_csv <- get_arg("out")
 
-if (is.null(features_csv) || !file.exists(features_csv)) {
-  stop(paste("Features CSV not found:", features_csv))
-}
-if (is.null(out_csv)) stop("Missing --out argument")
+if (is.null(in_csv) || !file.exists(in_csv)) stop(paste("Input CSV not found:", in_csv))
+if (is.null(out_csv)) stop("Missing --out")
 
-cat("Rdisop annotation starting...\n")
-cat("Features:", features_csv, "\nPolarity:", polarity, "\nOut:", out_csv, "\n")
+cat("Rdisop: reading masses from", in_csv, "\n")
+inp <- tryCatch(read.csv(in_csv, stringsAsFactors=FALSE, check.names=FALSE),
+                error=function(e) stop(paste("Cannot read input CSV:", e$message)))
+if (!all(c("id","mass") %in% names(inp))) stop("Input CSV must contain 'id' and 'mass'")
 
-`%||%` <- function(a,b) if (is.null(a) || length(a)==0) b else ifelse(is.na(a), b, a)
-
-df <- tryCatch({
-  read.csv(features_csv, stringsAsFactors = FALSE, check.names = FALSE)
-}, error=function(e) stop(paste("Failed to read features CSV:", e$message)))
-
-if (!("mz" %in% names(df))) stop("Features CSV must contain column 'mz'.")
-
-# Normalize RT → minutes
-if ("rt" %in% names(df)) {
-  df$RT_min <- suppressWarnings(as.numeric(df$rt)) / 60
-} else if ("RT" %in% names(df)) {
-  df$RT_min <- suppressWarnings(as.numeric(df$RT))
-} else if (!("RT_min" %in% names(df))) {
-  df$RT_min <- NA_real_
-}
-
-# --- Isotope filter: keep empty (= molecular) or patterns like [M]+, [M]- or [10][M]+ ---
-if ("isotopes" %in% names(df)) {
-  iso <- trimws(as.character(df$isotopes))
-  empty_iso <- is.na(iso) | iso == ""
-  molecular_pattern <- "^\\[\\d*\\]\\[M\\][+-]?$"
-  is_molecular <- grepl(molecular_pattern, iso)
-  keep <- empty_iso | is_molecular
-  kept <- sum(keep, na.rm=TRUE); dropped <- sum(!keep, na.rm=TRUE)
-  cat("Isotope filter: kept", kept, "rows; dropped", dropped, "non-molecular isotopes\n")
-  df <- df[keep, , drop = FALSE]
-}
-
-# If nothing left, write empty CSV with proper headers and exit success
-if (nrow(df) == 0) {
-  cat("No rows remain after isotope filter; writing empty CSV and exiting.\n")
-  res <- df
-  if (!("RT_min" %in% names(res))) res$RT_min <- numeric(0)
-  if (!("mz" %in% names(res)))     res$mz     <- numeric(0)
-  if (!("isotopes" %in% names(res))) res$isotopes <- character(0)
-  res$adduct_used      <- character(0)
-  res$ExactMass        <- numeric(0)
-  res$PredictedFormula <- character(0)
-  int_cols <- grep("(?i)intensity|into|maxo|area", names(res), perl=TRUE, value=TRUE)
-  keep_names <- unique(c("RT_min","mz","adduct_used","ExactMass","PredictedFormula","isotopes",
-                         int_cols, setdiff(names(res), c("rt"))))
-  res <- res[, intersect(keep_names, names(res)), drop=FALSE]
-  write.csv(res, out_csv, row.names = FALSE)
-  cat("Rdisop stage complete (empty) ->", out_csv, "\n")
-  quit(status = 0)
-}
-
-choose_adduct <- function(adduct, polarity) {
-  if (is.na(adduct) || adduct == "") return(ifelse(polarity == "positive", "[M+H]+", "[M-H]-"))
-  parts <- strsplit(adduct, ";|,")[[1]]
-  trimws(parts[1])
-}
-
-adduct_info <- list(
-  "[M+H]+"   = c(1.007276,  1),
-  "[M+Na]+"  = c(22.989218, 1),
-  "[M+K]+"   = c(38.963158, 1),
-  "[M+NH4]+" = c(18.033823, 1),
-  "[M+2H]2+" = c(2*1.007276, 2),
-  "[M-H]-"    = c(-1.007276, -1),
-  "[M+Cl]-"   = c(34.969402, -1),
-  "[M+FA-H]-" = c(46.00548 - 1.007276, -1),
-  "[M+HCOO]-" = c(46.00548 - 1.007276, -1)
-)
-
-neutral_mass <- function(mz, adduct){
-  if (is.na(mz) || is.na(adduct)) return(NA_real_)
-  info <- adduct_info[[adduct]]
-  if (is.null(info)) return(NA_real_)
-  shift <- info[1]; z <- info[2]
-  M <- (abs(z) * as.numeric(mz)) - shift
-  M / abs(z)
-}
-
-# Robust Rdisop wrapper (handles S4, list, or data.frame return)
-.extract_candidates <- function(cand) {
+extract_tab <- function(cand) {
   if (is.null(cand)) return(NULL)
   if (isS4(cand)) {
     sn <- try(slotNames(cand), silent=TRUE)
-    if (!inherits(sn, "try-error") && "results" %in% sn) {
-      return(cand@results)
-    }
+    if (!inherits(sn, "try-error") && "results" %in% sn) return(cand@results)
   }
   if (is.list(cand) && !is.null(cand$results)) return(cand$results)
   if (is.data.frame(cand)) return(cand)
   return(NULL)
 }
 
-predict_formula <- function(neutral_da){
-  if (is.na(neutral_da)) return(NA_character_)
-  window <- 0.005
-  cand <- tryCatch({
-    Rdisop::decomposeMass(neutral_da, mzabs=window, elements=c(C=0,H=0,N=0,O=0,P=0,S=0))
-  }, error=function(e) NULL)
-
-  tab <- .extract_candidates(cand)
-  if (is.null(tab) || nrow(tab) == 0) return(NA_character_)
-
-  # normalize column names (some versions use 'mass' instead of 'exactmass')
-  if (!("exactmass" %in% names(tab)) && "mass" %in% names(tab)) {
-    tab$exactmass <- tab$mass
-  }
-  if (!("exactmass" %in% names(tab))) return(NA_character_)
-
-  # Prefer DBE if provided; accept variations, else skip DBE filtering
+predict_formula_one <- function(mass) {
+  if (is.na(mass)) return(NA_character_)
+  cand <- tryCatch(Rdisop::decomposeMass(mass, mzabs=0.005, elements=c(C=0,H=0,N=0,O=0,P=0,S=0)),
+                   error=function(e) NULL)
+  tab <- extract_tab(cand)
+  if (is.null(tab) || nrow(tab)==0) return(NA_character_)
+  if (!("exactmass" %in% names(tab)) && "mass" %in% names(tab)) tab$exactmass <- tab$mass
   if ("dbd" %in% names(tab)) {
     tab <- tab[!is.na(tab$dbd) & tab$dbd > 0, , drop=FALSE]
   } else if ("RDBE" %in% names(tab)) {
     tab <- tab[!is.na(tab$RDBE) & tab$RDBE > 0, , drop=FALSE]
   }
-  if (nrow(tab) == 0) return(NA_character_)
-
-  tab$err <- abs(tab$exactmass - neutral_da)
+  if (nrow(tab)==0) return(NA_character_)
+  tab$err <- abs(tab$exactmass - mass)
   tab <- tab[order(tab$err), , drop=FALSE]
   tab$formula[1]
 }
 
-res <- df
-has_adduct_col <- "adduct" %in% names(df)
-res$adduct_used      <- NA_character_
-res$ExactMass        <- NA_real_
-res$PredictedFormula <- NA_character_
-
-n <- nrow(df)
+res <- data.frame(id = inp$id, predicted_formula = NA_character_, stringsAsFactors=FALSE)
+n <- nrow(inp)
 for (i in seq_len(n)) {
-  mz <- suppressWarnings(as.numeric(df$mz[i]))
-  ad <- if (has_adduct_col) choose_adduct(df$adduct[i] %||% NA_character_, polarity) else choose_adduct(NA_character_, polarity)
-  nm <- neutral_mass(mz, ad)
-  pf <- predict_formula(nm)
-  res$adduct_used[i]      <- ad
-  res$ExactMass[i]        <- nm
-  res$PredictedFormula[i] <- pf
-  if (i %% 1000 == 0) cat(".. processed", i, "rows\n")
+  res$predicted_formula[i] <- predict_formula_one(as.numeric(inp$mass[i]))
+  if (i %% 1000 == 0) cat(".. Rdisop processed", i, "rows\n")
 }
+write.csv(res, out_csv, row.names=FALSE)
+cat("Rdisop: wrote formulas to", out_csv, "\n")
+"""
 
-int_cols <- grep("(?i)intensity|into|maxo|area", names(res), perl=TRUE, value=TRUE)
-keep_names <- unique(c(
-  "RT_min","mz","adduct_used","ExactMass","PredictedFormula",
-  if ("isotopes" %in% names(res)) "isotopes" else character(0),
-  int_cols,
-  setdiff(names(res), c("rt"))
-))
-res <- res[, intersect(keep_names, names(res)), drop=FALSE]
+# ====== Request model ======
+class AnnotParams(BaseModel):
+    directory: str = Field(min_length=1, description="Folder containing Features CSV")
+    table: str = Field(min_length=1, description="Base name of features CSV (no .csv). E.g., Features_Matrix")
+    polarity: Literal["positive", "negative"]
+    analyte_csv: Optional[str] = Field(
+        None, description="Optional analyte CSV with columns: MolecularFormula, ExactMass, CompoundName"
+    )
 
-write.csv(res, out_csv, row.names = FALSE)
-cat("Rdisop stage complete ->", out_csv, "\n")
-'''
+# ====== Helpers ======
+def _safe(p: str) -> Path:
+    return Path(p).expanduser().resolve()
 
+def _ensure_exists(path: Path, what: str):
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"{what} not found: {path}")
+
+def choose_adduct(raw_adduct: Optional[str], polarity: str) -> str:
+    if raw_adduct and isinstance(raw_adduct, str) and raw_adduct.strip():
+        first = re.split(r"[;,]", raw_adduct)[0].strip()
+        if first:
+            return first
+    return "[M+H]+" if polarity == "positive" else "[M-H]-"
+
+def neutral_mass_from_mz(mz_val, adduct: str) -> Optional[float]:
+    info = ADDUCT_INFO.get(adduct)
+    try:
+        mz = float(mz_val)
+    except Exception:
+        return None
+    if not info:
+        return None
+    shift, z = info
+    return (abs(z) * mz - shift) / abs(z)
+
+def is_molecular_isotope_tag(tag: Optional[str]) -> bool:
+    """Keep empty/NA or tags like [M]+ / [M]- / [10][M]+ ; drop others."""
+    if tag is None:
+        return True
+    s = str(tag).strip()
+    if s == "":
+        return True
+    return re.match(r"^\[\d*\]\[M\][+-]?$", s) is not None
+
+# ====== Endpoint (streams logs) ======
 @router.post("/annotate/run")
 async def annotate_run(params: AnnotParams):
     directory = _safe(params.directory)
-    if not directory.exists():
-        raise HTTPException(status_code=400, detail=f"Directory not found: {directory}")
+    _ensure_exists(directory, "Directory")
 
     features_csv = (directory / f"{params.table}.csv").resolve()
     _ensure_exists(features_csv, "Features CSV")
+
     _ensure_exists(PLANTDB_PARQUET, "DB Parquet")
 
-    analyte_csv_path: Optional[Path] = None
+    analyte_path: Optional[Path] = None
     if params.analyte_csv:
-        analyte_csv_path = _safe(params.analyte_csv)
-        _ensure_exists(analyte_csv_path, "Analyte CSV")
+        analyte_path = _safe(params.analyte_csv)
+        _ensure_exists(analyte_path, "Analyte CSV")
 
-    r_out_csv = (directory / f"{params.table}__rdisop_stage.csv").resolve()
+    in_r_csv  = (directory / f"{params.table}__rdisop_in.csv").resolve()
+    out_r_csv = (directory / f"{params.table}__rdisop_out.csv").resolve()
+    r_src     = (directory / f"{params.table}__rdisop.R").resolve()
     final_out = (directory / "Features_Matrix_Annotated.csv").resolve()
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".R", delete=False) as tf:
-        tf.write(R_SCRIPT)
-        r_path = Path(tf.name)
-
-    cmd = [
-        RSCRIPT_BIN, str(r_path),
-        f"--features={str(features_csv)}",
-        f"--polarity={params.polarity}",
-        f"--out={str(r_out_csv)}",
-    ]
-
     async def stream():
-        # R stage
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except FileNotFoundError:
-            yield f"❌ Rscript not found at: {RSCRIPT_BIN}\n"
-            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-            return
+            # ---------- Python preprocessing ----------
+            yield "=== Annotation: Python preprocessing ===\n"
+            yield f"Loading: {features_csv}\n"
+            df = pd.read_csv(features_csv)
 
-        yield "=== Annotation (Rdisop) started ===\n"
-        async for chunk in proc.stdout:
-            yield chunk.decode(errors="ignore")
-        r_code = await proc.wait()
-        if r_code != 0:
-            yield f"❌ R stage failed (exit {r_code}).\n"
-            yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-            return
-
-        # Python/DuckDB join on PredictedFormula
-        try:
-            yield "=== Python stage: matching by PredictedFormula ===\n"
-            if not r_out_csv.exists():
-                yield f"❌ Intermediate CSV missing: {r_out_csv}\n"
+            if "mz" not in df.columns:
+                yield "❌ Features CSV must contain 'mz' column.\n"
                 yield "__ANNOT_DONE__ EXIT_CODE=1\n"
                 return
 
+            # Normalize RT → minutes
+            if "RT_min" not in df.columns:
+                if "rt" in df.columns:
+                    df["RT_min"] = pd.to_numeric(df["rt"], errors="coerce") / 60.0
+                elif "RT" in df.columns:
+                    df["RT_min"] = pd.to_numeric(df["RT"], errors="coerce")
+                else:
+                    df["RT_min"] = pd.NA
+
+            # Isotope filter
+            if "isotopes" in df.columns:
+                keep_mask = df["isotopes"].apply(is_molecular_isotope_tag)
+                kept = int(keep_mask.sum())
+                dropped = int((~keep_mask).sum())
+                yield f"Isotope filter: kept {kept}; dropped {dropped}\n"
+                df = df[keep_mask].copy()
+            else:
+                yield "No 'isotopes' column; treating all rows as molecular ions.\n"
+
+            if len(df) == 0:
+                yield "No rows remain after isotope filter; writing empty annotated CSV.\n"
+                pd.DataFrame(columns=["RT_min","mz","adduct","ExactMass","PredictedFormula","isotopes"]).to_csv(final_out, index=False)
+                yield f"✅ Wrote: {final_out}\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=0\n"
+                return
+
+            # Choose adduct + compute neutral mass
+            adduct_exists = "adduct" in df.columns
+            df["adduct_used"] = [
+                choose_adduct(df.at[i, "adduct"] if adduct_exists else None, params.polarity)
+                for i in df.index
+            ]
+            df["ExactMass"] = [neutral_mass_from_mz(df.at[i, "mz"], df.at[i, "adduct_used"]) for i in df.index]
+
+            # Assign row ids for round-trip to R
+            df["_rid"] = range(1, len(df) + 1)
+            masses_for_r = df[["_rid", "ExactMass"]].rename(columns={"_rid": "id", "ExactMass": "mass"})
+
+            # ---------- Write R inputs ----------
+            masses_for_r.to_csv(in_r_csv, index=False)
+            r_src.write_text(R_MIN_SCRIPT, encoding="utf-8")
+            yield f"Wrote R input: {in_r_csv}\n"
+            yield f"Wrote R script: {r_src}\n"
+
+            # ---------- Run Rdisop ----------
+            yield "=== Rdisop: predicting formulas ===\n"
+            cmd = [RSCRIPT_BIN, "--encoding=utf8", str(r_src), f"--in={in_r_csv}", f"--out={out_r_csv}"]
+            yield "Command: " + " ".join(shlex.quote(p) for p in cmd) + "\n"
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except FileNotFoundError:
+                yield f"❌ Rscript not found: {RSCRIPT_BIN}\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+                return
+
+            # stream R output live
+            async for chunk in proc.stdout:
+                yield chunk.decode(errors="ignore")
+            r_code = await proc.wait()
+            if r_code != 0:
+                yield f"❌ Rdisop failed (exit {r_code}).\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+                return
+
+            if not out_r_csv.exists():
+                yield f"❌ Missing R output: {out_r_csv}\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+                return
+
+            # ---------- Merge formulas back ----------
+            yield "=== Python postprocessing: merging & joining ===\n"
+            rform = pd.read_csv(out_r_csv)
+            if not {"id","predicted_formula"}.issubset(rform.columns):
+                yield "❌ R output must contain 'id' and 'predicted_formula'.\n"
+                yield "__ANNOT_DONE__ EXIT_CODE=1\n"
+                return
+            rform = rform.rename(columns={"id": "_rid", "predicted_formula": "PredictedFormula"})
+            df = df.merge(rform, on="_rid", how="left")
+
+            # Column order: key + intensities + rest
+            intensity_cols = [c for c in df.columns if re.search(r"(?i)(intensity|into|maxo|area)", c)]
+            key_cols = ["RT_min","mz","adduct_used","ExactMass","PredictedFormula"]
+            maybe_iso = ["isotopes"] if "isotopes" in df.columns else []
+            rest = [c for c in df.columns if c not in set(key_cols + maybe_iso + intensity_cols + ["_rid"])]
+            final_cols = key_cols + maybe_iso + intensity_cols + rest
+            df_final = df[final_cols].rename(columns={"adduct_used":"adduct"})
+
+            # ---------- DuckDB joins ----------
             con = duckdb.connect()
-            con.execute("CREATE OR REPLACE VIEW feats AS SELECT * FROM read_csv_auto(?, HEADER=TRUE)", [str(r_out_csv)])
+            con.execute("CREATE OR REPLACE VIEW feats AS SELECT * FROM df_final")
             con.execute("CREATE OR REPLACE VIEW mols  AS SELECT * FROM read_parquet(?)", [str(PLANTDB_PARQUET)])
 
             con.execute("""
@@ -286,9 +286,9 @@ async def annotate_run(params: AnnotParams):
 
             analyte_join_sql = ""
             analyte_sel_sql  = ""
-            if analyte_csv_path:
-                analyte_name = analyte_csv_path.stem
-                con.execute("CREATE OR REPLACE VIEW analyte AS SELECT * FROM read_csv_auto(?, HEADER=TRUE)", [str(analyte_csv_path)])
+            if analyte_path:
+                analyte_name = analyte_path.stem
+                con.execute("CREATE OR REPLACE VIEW analyte AS SELECT * FROM read_csv_auto(?, HEADER=TRUE)", [str(analyte_path)])
                 con.execute(f"""
                     CREATE OR REPLACE VIEW aagg AS
                     SELECT MolecularFormula AS formula, string_agg(CompoundName, ' / ') AS "{analyte_name}"
@@ -301,13 +301,13 @@ async def annotate_run(params: AnnotParams):
 
             sql = f"""
             SELECT
-              feats.RT_min         AS RT_min,
-              feats.mz             AS mz,
-              feats.adduct_used    AS adduct,
-              feats.ExactMass      AS ExactMass,
+              feats.RT_min,
+              feats.mz,
+              feats.adduct,
+              feats.ExactMass,
               feats.PredictedFormula,
-              feats.isotopes,
-              feats.* EXCLUDE (RT_min, mz, adduct_used, ExactMass, PredictedFormula, isotopes),
+              {"feats.isotopes," if "isotopes" in df_final.columns else ""}
+              feats.* EXCLUDE (RT_min, mz, adduct, ExactMass, PredictedFormula{", isotopes" if "isotopes" in df_final.columns else ""}),
               D.Candidates
               {analyte_sel_sql}
             FROM feats
@@ -318,15 +318,9 @@ async def annotate_run(params: AnnotParams):
             out_df.to_csv(final_out, index=False)
 
             yield f"✅ Wrote: {final_out}\n"
-            yield json.dumps({"ok": True, "output_csv": str(final_out)}) + "\n"
             yield "__ANNOT_DONE__ EXIT_CODE=0\n"
         except Exception as e:
             yield f"❌ Error: {e}\n"
             yield "__ANNOT_DONE__ EXIT_CODE=1\n"
-        finally:
-            try:
-                r_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     return StreamingResponse(stream(), media_type="text/plain; charset=utf-8")
