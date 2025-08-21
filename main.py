@@ -69,5 +69,16 @@ async def static_proxy(directory: str, file: str):
     return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/csv; charset=utf-8")
 
 
+@app.get("/ShowTable", response_class=HTMLResponse)
+async def show_table(
+    request: Request,
+    directory: str = Query(..., description="Folder containing the CSV"),
+    file: str = Query(..., description="CSV filename inside that folder")
+):
+    return templates.TemplateResponse(
+        "ShowTable.html",
+        {"request": request, "directory": directory, "file": file}
+    )
+
 if __name__ == '__main__':
     uvicorn.run(app, host="127.0.0.1", port=8000)
