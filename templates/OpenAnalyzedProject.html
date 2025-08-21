@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Features Table</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="/static/icon.jpeg" type="image/x-icon" />
+
+  <!-- DataTables + extensions (CDN) -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+  <link rel="stylesheet" href="https://cdn.datatables.net/colreorder/1.6.2/css/colReorder.dataTables.min.css">
+  <link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.dataTables.min.css">
+
+  <style>
+    :root { --bg:#e6f3f5; --btn:#007bff; --btn-hover:#0056b3; --border:#ddd; --text:#111; }
+    * { box-sizing: border-box; }
+    body { margin:0; padding:24px; background:var(--bg); font-family: Arial, sans-serif; color:var(--text); }
+    .wrap { max-width: 95%; margin: 0 auto; }
+    .card { background:#fff; border:1px solid var(--border); border-radius:16px; padding:20px; box-shadow: 0 4px 18px rgba(0,0,0,.06); }
+    h2 { margin: 0 0 14px 0; }
+    .meta { display:flex; gap:16px; flex-wrap: wrap; margin-bottom: 10px; }
+    .pill { display:inline-block; padding:6px 12px; border-radius:20px; background:#f8f8f8; border:1px solid var(--border); font-size:14px; }
+    .controls { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0 8px; align-items:center; }
+    button.primary { background:var(--btn); color:#fff; border:none; padding:10px 14px; border-radius:12px; cursor:pointer; }
+    button.primary:hover { background:var(--btn-hover); }
+    label { font-size:14px; }
+    .dt-buttons .dt-button { background:#f2f2f2 !important; border-radius:10px !important; border:1px solid #ddd !important; }
+    table.dataTable tbody tr.selected { background:#e0f2ff; }
+    .legend { font-size:12px; color:#555; margin-top:6px; }
+    select.candidate-select { padding:4px 6px; border-radius:8px; }
+    .toolbar { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    #errorMsg { color:#b00020; margin:8px 0 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h2>Features Table</h2>
+      <div class="meta">
+        <span class="pill">Directory: <strong>{{ directory }}</strong></span>
+        <span class="pill">File: <strong>{{ file }}</strong></span>
+      </div>
+
+      <div class="controls">
+        <div class="toolbar">
+          <button class="primary" id="btnPCA">PCA</button>
+          <button class="primary" id="btnKMD">KMD</button>
+          <button class="primary" id="btnRKMD">Referenced KMD</button>
+          <button class="primary" id="btnHeatmap">Toggle Heatmap</button>
+        </div>
+        <div class="toolbar">
+          <label for="rowsSelect">Rows per page:</label>
+          <select id="rowsSelect">
+            <option>10</option>
+            <option selected>25</option>
+            <option>50</option>
+            <option>100</option>
+            <option>250</option>
+            <option>500</option>
+            <option value="-1">All</option>
+          </select>
+          <button class="primary" id="btnReport">Generate Final Report for Selected</button>
+        </div>
+      </div>
+
+      <div id="errorMsg"></div>
+      <table id="tbl" class="display" style="width:100%"></table>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <!-- Libs (order matters) -->
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/colreorder/1.6.2/js/dataTables.colReorder.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+  <!-- JSZip must be loaded BEFORE buttons.html5 for CSV export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <script>
+  // Assumes jQuery, DataTables, Buttons, ColReorder, JSZip (optional), and PapaParse are loaded above.
+
+  (function () {
+    // --- Inputs from Jinja/Backend ---
+    const directory = {{ directory|default('')|tojson }};
+    const file = {{ file|default('')|tojson }};
+    const csvUrl = `/static-proxy?directory=${encodeURIComponent(directory)}&file=${encodeURIComponent(file)}`;
+
+    // --- State ---
+    let dt = null;
+    let intensityColsIdx = [];
+    let heatmapOn = false;
+    const selectedMap = new Map(); // feature_id -> true
+
+    // --- Known non-intensity/meta columns (heuristic) ---
+    const META_COLS = new Set([
+      'RT in min','RT_min','RT','rt','rtmin','rtmax','mz','mzmin','mzmax',
+      'ExactMass','CandidateFormula','Candidates','Adduct','pcgroup','feature_id','has_ms2',
+      'blank','sample','ms_level','npeaks','isotopes','adduct','adduct_1','SelectedAnnotation'
+    ]);
+
+    // --- Error box (optional) ---
+    const errBox = document.getElementById('errorMsg');
+    const showError = (msg) => { if (errBox) errBox.textContent = msg; console.error(msg); };
+
+    // ---------- Helpers ----------
+    function isNumericArray(arr) {
+      return arr.every(v => v === null || v === "" || !isNaN(parseFloat(v)));
+    }
+
+    function autoIntensityColumns(header, rows) {
+      const idx = [];
+      header.forEach((name, i) => {
+        if (name.endsWith('.mzML')) { idx.push(i); return; }
+        if (!META_COLS.has(name)) {
+          const col = rows.map(r => r[i]);
+          if (isNumericArray(col)) idx.push(i);
+        }
+      });
+      return idx;
+    }
+
+    function applyHeatmap() {
+      if (!dt) return;
+      const api = dt.api();
+      // reset any previous color
+      api.cells().every(function(){ $(this.node()).css('background',''); });
+      if (!heatmapOn) return;
+
+      // shade intensity columns on current page
+      intensityColsIdx.forEach(ci => {
+        const data = api.column(ci, { search:'applied', page:'current' }).data().toArray()
+          .map(v => parseFloat(v)).filter(v => !isNaN(v));
+        if (data.length === 0) return;
+        const min = Math.min(...data);
+        const max = Math.max(...data);
+        const range = (max - min) || 1;
+
+        api.column(ci, { page:'current' }).nodes().each(function(cell){
+          const val = parseFloat($(cell).text());
+          if (isNaN(val)) return;
+          const t = Math.max(0, Math.min(1, (val - min) / range));
+          $(cell).css('background', `rgba(0, 123, 255, ${0.15 + 0.45*t})`);
+        });
+      });
+    }
+
+    function candidateOptions(candStr) {
+      if (!candStr) return ['No Annotation'];
+      const raw = String(candStr).split('/').map(s => s.trim()).filter(Boolean);
+      const uniq = [...new Set(raw)];
+      return uniq.length ? ['No Annotation', ...uniq] : ['No Annotation'];
+    }
+
+    function wireButtons() {
+      // quick URL builder for auxiliary endpoints
+      const q = (extra = {}) => new URLSearchParams({ directory, file, ...extra }).toString();
+
+      // Analysis buttons (open in new tab)
+      const pca = document.getElementById('btnPCA');
+      const kmd = document.getElementById('btnKMD');
+      const rkmd = document.getElementById('btnRKMD');
+      const heat = document.getElementById('btnHeatmap');
+      if (pca) pca.onclick = () => window.open(`/xcms/pca?${q()}`, '_blank');
+      if (kmd) kmd.onclick = () => window.open(`/xcms/kmd?${q()}`, '_blank');
+      if (rkmd) rkmd.onclick = () => window.open(`/xcms/rkmd?${q()}`, '_blank');
+      if (heat) heat.onclick = () => { heatmapOn = !heatmapOn; applyHeatmap(); };
+
+      // Rows per page
+      const rowsSelect = document.getElementById('rowsSelect');
+      if (rowsSelect) {
+        rowsSelect.onchange = () => {
+          const val = Number(rowsSelect.value);
+          dt.page.len(val).draw();
+        };
+      }
+
+      // Generate final report (POST → download CSV, show R status/log)
+      const btnReport = document.getElementById('btnReport');
+      if (btnReport) {
+        btnReport.onclick = async () => {
+          const featureIds = [...selectedMap.keys()];
+          if (featureIds.length === 0) {
+            alert('Please select at least one feature.');
+            return;
+          }
+          const resp = await fetch('/annotate/generate_final_report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ directory, file, feature_ids: featureIds })
+          });
+          if (!resp.ok) {
+            const err = await resp.text();
+            alert('Error generating report: ' + err);
+            return;
+          }
+          // Download finalReport.csv regardless of R status
+          const blob = await resp.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = "finalReport.csv";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+
+          // Surface R status (headers are safe single-line)
+          const rStatus = resp.headers.get("X-R-Status");
+          const rErr = resp.headers.get("X-R-Stderr");
+          const rLog = resp.headers.get("X-R-Log");
+          if (rStatus && rStatus !== "0") {
+            let msg = "Report CSV saved, but the R script returned an error.";
+            if (rErr) msg += "\n\n" + rErr;
+            if (rLog) msg += `\n\nOpening log: ${rLog}`;
+            alert(msg);
+            if (rLog) {
+              const logUrl = `/static-proxy?directory=${encodeURIComponent(directory)}&file=${encodeURIComponent(rLog)}`;
+              window.open(logUrl, "_blank");
+            }
+          }
+        };
+      }
+
+      // Persist checkbox selection across pages/search
+      $('#tbl').on('change', 'input.row-check', function () {
+        const featureId = $(this).data('fid');
+        if (this.checked) selectedMap.set(String(featureId), true);
+        else selectedMap.delete(String(featureId));
+      });
+
+      // Candidate dropdown change → POST to backend
+      $('#tbl').on('change', 'select.candidate-select', async function () {
+        const featureId = $(this).data('fid');
+        const value = $(this).val();
+        const fd = new FormData();
+        fd.append('directory', directory);
+        fd.append('file', file);
+        fd.append('feature_id', featureId);
+        fd.append('selected_annotation', value);
+        try {
+          const r = await fetch('/annotate/update_annotation', { method: 'POST', body: fd });
+          if (!r.ok) throw new Error(await r.text());
+        } catch (e) {
+          alert('Failed to update annotation: ' + (e?.message || e));
+          this.value = 'No Annotation';
+        }
+      });
+
+      // Re-apply selection after redraw; update heatmap
+      $('#tbl').on('draw.dt', function () {
+        $('#tbl input.row-check').each(function () {
+          const fid = String($(this).data('fid'));
+          this.checked = selectedMap.has(fid);
+        });
+        applyHeatmap();
+      });
+    }
+
+    function buildTable(header, rows) {
+      if (!header || header.length === 0) {
+        showError('CSV appears to have no header. Make sure the first row contains column names.');
+        return;
+      }
+      if (dt) { dt.destroy(); $('#tbl').empty(); }
+
+      const idxFeatureId = header.indexOf('feature_id');
+      const idxCandidates = header.indexOf('Candidates');
+      const idxSelectedAnn = header.indexOf('SelectedAnnotation');
+
+      // Extra columns: checkbox, candidate selector, plot link
+      const headerOut = ['Select', ...header, 'Choose Candidate', 'View Plots'];
+
+      const dataOut = rows.map(r => {
+        const fid = idxFeatureId >= 0 ? r[idxFeatureId] : '';
+        const candStr = idxCandidates >= 0 ? r[idxCandidates] : '';
+        const priorSel = idxSelectedAnn >= 0 ? (r[idxSelectedAnn] || '') : '';
+        const opts = candidateOptions(candStr);
+
+        const selectHtml =
+          `<input type="checkbox" class="row-check" data-fid="${fid}">`;
+        const selectCand =
+          `<select class="candidate-select" data-fid="${fid}">` +
+          opts.map(o => `<option value="${o}" ${o === priorSel ? 'selected' : ''}>${o}</option>`).join('') +
+          `</select>`;
+        const viewUrl =
+          `/xcms/plot_feature?directory=${encodeURIComponent(directory)}&file=${encodeURIComponent(file)}&feature_id=${encodeURIComponent(fid)}`;
+        const viewLink = `<a href="${viewUrl}" target="_blank">View</a>`;
+
+        return [selectHtml, ...r, selectCand, viewLink];
+      });
+
+      // Buttons: include CSV export only if JSZip is present
+      const buttonsArr = [{ extend: 'copyHtml5', title: 'Features_Table' }];
+      if (typeof window.JSZip !== 'undefined') {
+        buttonsArr.push({ extend: 'csvHtml5', title: 'Features_Table' });
+      } else {
+        console.warn('JSZip not loaded: CSV export button disabled.');
+      }
+
+      // Initialize DataTable
+      dt = $('#tbl').DataTable({
+        data: dataOut,
+        columns: headerOut.map(h => ({ title: h })),
+        deferRender: true,
+        pageLength: 25,
+        lengthMenu: [10, 25, 50, 100, 250, 500, -1],
+        searching: true,
+        ordering: true,
+        scrollX: true,
+        colReorder: true,
+        dom: 'lBfrtip',
+        buttons: buttonsArr,
+        columnDefs: [
+          { orderable: false, targets: [0, headerOut.length - 1, headerOut.length - 2] }
+        ]
+      });
+
+      // Detect intensity columns & show legend
+      intensityColsIdx = autoIntensityColumns(header, rows);
+      const legend = document.getElementById('legend');
+      if (legend) {
+        legend.textContent = intensityColsIdx.length
+          ? `Intensity columns detected: ${intensityColsIdx.map(i => header[i]).join(', ')}`
+          : 'No intensity columns auto-detected.';
+      }
+
+      wireButtons();
+      dt.on('draw', applyHeatmap);
+    }
+
+    // --- Load CSV via /static-proxy and render ---
+    fetch(csvUrl)
+      .then(res => {
+        if (!res.ok) throw new Error('CSV not found');
+        return res.text();
+      })
+      .then(text => {
+        const parsed = Papa.parse(text, { header: true, dynamicTyping: false, skipEmptyLines: true });
+        const header = parsed.meta.fields || [];
+        const rows = parsed.data.map(row => header.map(h => row[h]));
+        buildTable(header, rows);
+      })
+      .catch(err => {
+        showError('Failed to load CSV: ' + err.message);
+      });
+
+  })();
+</script>
+
+</body>
+</html>

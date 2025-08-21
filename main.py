@@ -80,5 +80,11 @@ async def show_table(
         {"request": request, "directory": directory, "file": file}
     )
 
+
+@app.get("/OpenAnalyzedProject")
+async def OpenAnalyzedProject(request: Request):
+    return templates.TemplateResponse("OpenAnalyzedProject.html", {"request": request})
+
+
 if __name__ == '__main__':
     uvicorn.run(app, host="127.0.0.1", port=8000)
