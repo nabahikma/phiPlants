@@ -5,11 +5,12 @@ from typing import Optional, Literal
 from pathlib import Path
 import asyncio
 import tempfile
+import os
 
 router = APIRouter()
 
-# Set to absolute Rscript.exe if needed on Windows
-RSCRIPT_BIN = "Rscript"
+# Portable-aware: pick up Rscript path from env (run_app.py sets RSCRIPT_EXE)
+RSCRIPT_BIN = os.getenv("RSCRIPT_EXE", "Rscript")
 
 
 class XcmsParams(BaseModel):
@@ -21,7 +22,6 @@ class XcmsParams(BaseModel):
     noise: float = Field(ge=0)
     min_peakwidth: float = Field(2.0, gt=0)
     max_peakwidth: float = Field(30.0, gt=0)
-    # mzdiff is FIXED in R at -0.001 (no user control)
     timeout_sec: Optional[int] = Field(0, ge=0, description="0 = no timeout")
 
     @field_validator("output_name")
@@ -49,16 +49,24 @@ def _ensure_ready(params: XcmsParams) -> Path:
 
 
 R_SCRIPT_EMBEDDED = r'''
-# ==== Safe Library Loader ====
-load_or_install <- function(pkg){
+# ==== Portable-friendly library paths ====
+# Honor environment-controlled lib paths (set in run_app.py)
+lib_envs <- unique(Filter(nzchar, c(Sys.getenv("R_LIBS"),
+                                    Sys.getenv("R_LIBS_USER"),
+                                    Sys.getenv("R_USER_LIBS"))))
+if (length(lib_envs)) .libPaths(c(lib_envs, .libPaths()))
+
+# ==== Fail-fast library loader (no installs on target PCs) ====
+load_or_fail <- function(pkg){
   if (!requireNamespace(pkg, quietly = TRUE)) {
-    install.packages(pkg, repos = "http://cran.us.r-project.org")
+    stop(paste0("Package '", pkg, "' is not installed in portable R library. ",
+                "Please run Scripts/bootstrap_R_library.R during packaging."))
   }
   suppressPackageStartupMessages(library(pkg, character.only = TRUE))
 }
 
 pkgs <- c("xcms","CAMERA","tibble","ggplot2","purrr","MSnbase","dplyr","gridExtra")
-invisible(lapply(pkgs, load_or_install))
+invisible(lapply(pkgs, load_or_fail))
 
 # ==== Parse CLI Args ====
 args <- commandArgs(trailingOnly = TRUE)
@@ -181,7 +189,6 @@ async def xcms_start(params: XcmsParams):
         f"--noise={params.noise}",
         f"--min_peakwidth={params.min_peakwidth}",
         f"--max_peakwidth={params.max_peakwidth}",
-        # no --mzdiff; it is fixed in R at -0.001
     ]
 
     async def stream():

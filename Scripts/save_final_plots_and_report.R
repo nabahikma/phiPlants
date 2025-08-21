@@ -1,5 +1,11 @@
 # === Required Libraries ===
 suppressMessages({
+  # Portable-friendly library paths (from env)
+  lib_envs <- unique(Filter(nzchar, c(Sys.getenv("R_LIBS"),
+                                      Sys.getenv("R_LIBS_USER"),
+                                      Sys.getenv("R_USER_LIBS"))))
+  if (length(lib_envs)) .libPaths(c(lib_envs, .libPaths()))
+
   library(xcms)
   library(CAMERA)
   library(MSnbase)
