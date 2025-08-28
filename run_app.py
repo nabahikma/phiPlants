@@ -1,3 +1,53 @@
+# run_app.py
+import os, sys, threading, time, webbrowser, shutil
+from pathlib import Path
+import uvicorn
+
+# Resolve base folder even when running as onefile EXE
+BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)).resolve()
+os.chdir(BASE)
+
+# Portable tool paths
+PORTABLE_R = BASE / "portable" / "R"
+PORTABLE_RSCRIPT = PORTABLE_R / "bin" / "Rscript.exe"
+PORTABLE_R_LIB = PORTABLE_R / "library"
+
+PORTABLE_PWIZ = BASE / "portable" / "pwiz"
+PORTABLE_MSCONVERT = PORTABLE_PWIZ / "msconvert.exe"
+
+# Add portable bins to PATH so subprocess can find them (fallbacks if env not set elsewhere)
+os.environ["PATH"] = str(PORTABLE_PWIZ) + os.pathsep + str(PORTABLE_R / "bin") + os.pathsep + os.environ.get("PATH", "")
+
+# Environment defaults used by your routers
+os.environ.setdefault("PLANTDB_CSV", str((BASE / "data" / "PlantDB_ESI.csv").resolve()))
+os.environ.setdefault("RSCRIPT_EXE", str(PORTABLE_RSCRIPT))       # FastAPI will call this
+os.environ.setdefault("R_HOME", str(PORTABLE_R))
+os.environ.setdefault("R_USER_LIBS", str(PORTABLE_R_LIB))         # where packages live
+os.environ.setdefault("MSCONVERT_EXE", str(PORTABLE_MSCONVERT))   # msconvert path for routers/msconvert.py
+os.environ.setdefault("PORT", "8000")
+
+# Sanity logs (optional)
+def _log_env():
+    print("== Portable tool check ==")
+    print("Rscript:", os.environ["RSCRIPT_EXE"], "- exists?", (Path(os.environ["RSCRIPT_EXE"]).exists()))
+    print("msconvert:", os.environ["MSCONVERT_EXE"], "- exists?", (Path(os.environ["MSCONVERT_EXE"]).exists()))
+    print("R libs:", os.environ["R_USER_LIBS"], "- exists?", (Path(os.environ["R_USER_LIBS"]).exists()))
+_log_env()
+
+# Import your FastAPI app
+from main import app  # noqa
+
+def _open_browser(url: str):
+    def run():
+        time.sleep(1.5)
+        try: webbrowser.open(url)
+        except: pass
+    threading.Thread(target=run, daemon=True).start()
+
+if __name__ == "__main__":
+    url = f"http://127.0.0.1:{os.environ['PORT']}"
+    _open_browser(url)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ["PORT"]))
 import uvicorn
 from fastapi import FastAPI, Request, Query
 from starlette.responses import HTMLResponse
