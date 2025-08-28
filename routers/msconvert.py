@@ -44,7 +44,7 @@ async def run_msconvert(
             yield "__MSCONVERT_DONE__ EXIT_CODE=1\n"
         return StreamingResponse(err_stream(), media_type="text/plain; charset=utf-8")
 
-    msconvert_exe = _find_msconvert_exe()
+    msconvert_exe = "portable/pwiz/msconvert.exe"
     if not msconvert_exe:
         def err_stream2():
             yield "❌ msconvert.exe not found.\n"
